@@ -178,7 +178,13 @@ def name_similarity_score(a: str, b: str) -> float:
     return intersection / min(len(ta), len(tb))
 
 
-def build_exact_query(park: Park, radius: int) -> str:
+def build_exact_query(
+    park: Park,
+    radius: int,
+    *,
+    include_relations: bool = True,
+    include_ways: bool = True,
+) -> str:
     variants = [park.name]
     is_state_park_name = bool(re.search(r"state park", park.name, flags=re.IGNORECASE))
     if re.search(r"state park", park.name, flags=re.IGNORECASE) and not re.search(
@@ -186,20 +192,35 @@ def build_exact_query(park: Park, radius: int) -> str:
     ):
         variants.append(f"{park.name} and Museum")
     pattern = "|".join(escape_overpass_regex(v) for v in variants)
-    park_tag_lines = ""
-    if is_state_park_name:
-        park_tag_lines = f"""
-  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];
-  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];"""
+    query_lines: list[str] = []
+    if include_relations:
+        query_lines.extend(
+            [
+                f'relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];',
+                f'relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];',
+                f'relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["type"="boundary"];',
+            ]
+        )
+        if is_state_park_name:
+            query_lines.append(
+                f'relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];'
+            )
+    if include_ways:
+        query_lines.extend(
+            [
+                f'way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];',
+                f'way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];',
+            ]
+        )
+        if is_state_park_name:
+            query_lines.append(
+                f'way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];'
+            )
+    lines = "\n  ".join(query_lines)
     return f"""
 [out:json][timeout:60];
 (
-  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
-  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
-  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["type"="boundary"];
-  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
-  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
-  {park_tag_lines}
+  {lines}
 );
 out body;
 >;
@@ -436,34 +457,59 @@ def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, 
         final_features = annotate_and_rank_features(park, features)
         return {"type": "FeatureCollection", "features": final_features}
 
-    radius = 350000 if "National Forest" in park.name else 120000
-    first = overpass_request(build_exact_query(park, radius), retries=retries, timeout=timeout)
-    geo = to_geojson(first)
-    features = extract_polygon_features(geo)
+    is_forest = "National Forest" in park.name
+    initial_radius = 220000 if is_forest else 70000
+    secondary_radius = 420000 if is_forest else 150000
+    staged_queries = [
+        (initial_radius, True, False),
+        (initial_radius, False, True),
+        (secondary_radius, True, False),
+        (secondary_radius, False, True),
+    ]
+    features: list[dict[str, Any]] = []
+    last_stage_error: Exception | None = None
+    for radius, use_rel, use_way in staged_queries:
+        try:
+            payload = overpass_request(
+                build_exact_query(park, radius, include_relations=use_rel, include_ways=use_way),
+                retries=retries,
+                timeout=timeout,
+            )
+            geo = to_geojson(payload)
+            features = extract_polygon_features(geo)
+            if features:
+                break
+        except Exception as exc:  # noqa: BLE001
+            last_stage_error = exc
 
     if not features:
-        second = overpass_request(build_exact_query(park, 450000), retries=retries, timeout=timeout)
-        geo = to_geojson(second)
-        features = extract_polygon_features(geo)
-
-    if not features:
-        broad = overpass_request(build_broad_query(park, 180000), retries=retries, timeout=timeout)
-        geo = to_geojson(broad)
-        candidates: list[dict[str, Any]] = []
-        for feature in extract_polygon_features(geo):
-            candidate_name = str((feature.get("properties") or {}).get("name") or "")
-            similarity = name_similarity_score(park.name, candidate_name)
-            if similarity >= 0.55:
-                props = dict(feature.get("properties") or {})
-                props["_potaMatchNote"] = (
-                    f"{park.reference} {park.name}... found match {candidate_name}"
+        for broad_radius in ([120000, 220000] if not is_forest else [280000, 420000]):
+            try:
+                broad = overpass_request(
+                    build_broad_query(park, broad_radius), retries=retries, timeout=timeout
                 )
-                props["_potaSimilarity"] = similarity
-                feature["properties"] = props
-                candidates.append(feature)
-        features = candidates
+                geo = to_geojson(broad)
+                candidates: list[dict[str, Any]] = []
+                for feature in extract_polygon_features(geo):
+                    candidate_name = str((feature.get("properties") or {}).get("name") or "")
+                    similarity = name_similarity_score(park.name, candidate_name)
+                    if similarity >= 0.55:
+                        props = dict(feature.get("properties") or {})
+                        props["_potaMatchNote"] = (
+                            f"{park.reference} {park.name}... found match {candidate_name}"
+                        )
+                        props["_potaSimilarity"] = similarity
+                        feature["properties"] = props
+                        candidates.append(feature)
+                features = candidates
+                if features:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                last_stage_error = exc
 
     if not features:
+        if last_stage_error is not None:
+            raise last_stage_error
         return None
 
     final_features = annotate_and_rank_features(park, features)

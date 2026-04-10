@@ -219,7 +219,7 @@ async function fetchBoundaryGeoJson(park) {
 
   const unique = new Map();
   for (const f of features) {
-    const id = f.id || `${f.properties?.@type || "obj"}-${f.properties?.@id || Math.random()}`;
+    const id = f.id || `${f.properties?.["@type"] || "obj"}-${f.properties?.["@id"] || Math.random()}`;
     if (!unique.has(id)) {
       unique.set(id, f);
     }

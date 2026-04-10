@@ -953,13 +953,15 @@ async function loadBoundary() {
             color: "#0e6f50",
             weight: 4,
             opacity: 0.9,
+            className: "boundary-line",
           };
         }
         return {
           color: "#0e6f50",
           weight: 2,
           fillColor: "#1fa477",
-          fillOpacity: 0.22,
+          fillOpacity: 0.24,
+          className: "boundary-polygon",
         };
       },
       onEachFeature: (feature, layer) => {

@@ -228,6 +228,17 @@ button:disabled {
   max-height: none !important;
 }
 
+/* Darken overlapping boundaries naturally without heavy geometry processing. */
+#map path.boundary-polygon,
+#map path.boundary-line {
+  mix-blend-mode: multiply;
+}
+
+#map path.boundary-line {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;

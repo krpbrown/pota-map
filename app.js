@@ -666,20 +666,18 @@ function riverNameVariants(parkName) {
   return Array.from(new Set(variants.filter(Boolean)));
 }
 
-function buildRiverOverpassQuery(park, radiusMeters) {
-  const pattern = riverNameVariants(park.name)
-    .map((name) => escapeOverpassRegex(name))
-    .join("|");
+function buildRiverExactNameQuery(park, radiusMeters, exactName) {
+  const name = exactName.replaceAll('"', '\\"');
   return `
 [out:json][timeout:60];
 (
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["type"="waterway"];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["waterway"="river"];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["waterway"="river"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["type"="waterway"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["waterway"="river"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["boundary"~"protected_area|national_park"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["leisure"="nature_reserve"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["waterway"="river"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["boundary"~"protected_area|national_park"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["leisure"="nature_reserve"];
 );
 out body;
 >;
@@ -739,51 +737,48 @@ async function overpassRequest(query) {
 
 async function fetchBoundaryGeoJson(park) {
   if (isRiverPark(park)) {
-    const first = await overpassRequest(buildRiverOverpassQuery(park, 160000));
-    let geo = osmtogeojson(first);
-    let features = extractFeaturesByMode(geo, "river")
-      .map((f) => {
-        const candidateName = f.properties?.name || "";
-        const similarity = nameSimilarityScore(park.name, candidateName);
-        return { feature: f, similarity, candidateName };
-      })
-      .filter((x) => x.similarity >= 0.5)
-      .sort((a, b) => b.similarity - a.similarity)
-      .map((x) => ({
-        ...x.feature,
-        properties: {
-          ...(x.feature.properties || {}),
-          _potaMatchNote: `${park.reference} ${park.name}... found match ${x.candidateName}`,
-          _potaSimilarity: x.similarity,
-        },
-      }));
+    const variants = riverNameVariants(park.name).slice(0, 6);
+    const radii = [50000, 140000, 260000];
+    const riverFeatures = [];
 
-    if (!features.length) {
-      const fallback = await overpassRequest(buildRiverOverpassQuery(park, 320000));
-      geo = osmtogeojson(fallback);
-      features = extractFeaturesByMode(geo, "river")
-        .map((f) => {
-          const candidateName = f.properties?.name || "";
-          const similarity = nameSimilarityScore(park.name, candidateName);
-          return { feature: f, similarity, candidateName };
-        })
-        .filter((x) => x.similarity >= 0.5)
-        .sort((a, b) => b.similarity - a.similarity)
-        .map((x) => ({
-          ...x.feature,
-          properties: {
-            ...(x.feature.properties || {}),
-            _potaMatchNote: `${park.reference} ${park.name}... found match ${x.candidateName}`,
-            _potaSimilarity: x.similarity,
-          },
-        }));
+    for (const radius of radii) {
+      for (const variant of variants) {
+        try {
+          const payload = await overpassRequest(buildRiverExactNameQuery(park, radius, variant));
+          const geo = osmtogeojson(payload);
+          const scored = extractFeaturesByMode(geo, "river")
+            .map((f) => {
+              const candidateName = f.properties?.name || "";
+              const similarity = nameSimilarityScore(park.name, candidateName);
+              return { feature: f, similarity, candidateName };
+            })
+            .filter((x) => x.similarity >= 0.5)
+            .sort((a, b) => b.similarity - a.similarity)
+            .map((x) => ({
+              ...x.feature,
+              properties: {
+                ...(x.feature.properties || {}),
+                _potaMatchNote: `${park.reference} ${park.name}... found match ${x.candidateName}`,
+                _potaSimilarity: x.similarity,
+              },
+            }));
+          if (scored.length) {
+            riverFeatures.push(...scored);
+          }
+        } catch (err) {
+          // Continue trying additional names/radii/endpoints for resilience.
+        }
+      }
+      if (riverFeatures.length) {
+        break;
+      }
     }
 
-    if (!features.length) {
+    if (!riverFeatures.length) {
       return null;
     }
 
-    const ranked = Array.from(features)
+    const ranked = Array.from(riverFeatures)
       .map((f) => {
         const center = featureCenter(f);
         const distance = center

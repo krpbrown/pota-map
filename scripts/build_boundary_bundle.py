@@ -57,11 +57,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--max", type=int, default=0, help="Limit number of parks (0 = no limit)")
+    parser.add_argument(
+        "--issues-log",
+        default="data/us-boundary-issues.jsonl",
+        help="Path to write boundary issue records (JSONL)",
+    )
     return parser.parse_args()
 
 
 def load_parks(path: Path) -> list[Park]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     parks: list[Park] = []
     for row in data:
         parks.append(
@@ -280,7 +285,7 @@ def load_existing_records(path: Path) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
     try:
-        bundle = json.loads(path.read_text(encoding="utf-8"))
+        bundle = json.loads(path.read_text(encoding="utf-8-sig"))
         records = bundle.get("records", [])
         out: dict[str, dict[str, Any]] = {}
         for record in records:
@@ -300,8 +305,17 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def append_issue(path: Path, entry: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def main() -> int:
     args = parse_args()
+    issues_path = Path(args.issues_log)
+    issues_path.parent.mkdir(parents=True, exist_ok=True)
+    issues_path.write_text("", encoding="utf-8")
 
     parks = load_parks(Path(args.parks_file))
     if not args.all:
@@ -323,15 +337,25 @@ def main() -> int:
 
     total = len(parks)
     print(f"Processing {total} park(s)...")
+    print(f"Issues log: {issues_path}")
 
     for idx, park in enumerate(parks, start=1):
         if park.reference in existing:
-            print(f"[{idx}/{total}] {park.reference} skip (already in bundle)")
+            print(f"[{idx}/{total}] {park.reference} | {park.name} -> skip (already in bundle)")
             continue
 
         try:
             geojson = fetch_boundary_geojson(park, retries=args.retries, timeout=args.timeout)
             if geojson and geojson.get("features"):
+                feature_count = len(geojson["features"])
+                selected_name = str(
+                    ((geojson["features"][0].get("properties") or {}).get("name"))
+                    or park.name
+                )
+                match_note = str(
+                    ((geojson["features"][0].get("properties") or {}).get("_potaMatchNote"))
+                    or ""
+                ).strip()
                 existing[park.reference] = {
                     "reference": park.reference,
                     "geojson": geojson,
@@ -339,7 +363,23 @@ def main() -> int:
                     "updatedAt": now_ms(),
                 }
                 fetched += 1
-                print(f"[{idx}/{total}] {park.reference} fetched ({len(geojson['features'])} feature(s))")
+                print(
+                    f"[{idx}/{total}] {park.reference} | {park.name} -> "
+                    f"boundary found '{selected_name}' ({feature_count} polygon"
+                    f"{'' if feature_count == 1 else 's'} selected)"
+                )
+                if match_note:
+                    append_issue(
+                        issues_path,
+                        {
+                            "timestamp": now_iso(),
+                            "reference": park.reference,
+                            "name": park.name,
+                            "location": park.location,
+                            "status": "similar-name-fallback",
+                            "detail": match_note,
+                        },
+                    )
             else:
                 existing[park.reference] = {
                     "reference": park.reference,
@@ -348,10 +388,32 @@ def main() -> int:
                     "updatedAt": now_ms(),
                 }
                 no_boundary += 1
-                print(f"[{idx}/{total}] {park.reference} no-boundary")
+                print(f"[{idx}/{total}] {park.reference} | {park.name} -> no boundary found")
+                append_issue(
+                    issues_path,
+                    {
+                        "timestamp": now_iso(),
+                        "reference": park.reference,
+                        "name": park.name,
+                        "location": park.location,
+                        "status": "no-boundary",
+                        "detail": "No matching polygon boundary returned by Overpass/OSM",
+                    },
+                )
         except Exception as exc:  # noqa: BLE001
             failed += 1
-            print(f"[{idx}/{total}] {park.reference} failed: {exc}", file=sys.stderr)
+            print(f"[{idx}/{total}] {park.reference} | {park.name} -> failed: {exc}", file=sys.stderr)
+            append_issue(
+                issues_path,
+                {
+                    "timestamp": now_iso(),
+                    "reference": park.reference,
+                    "name": park.name,
+                    "location": park.location,
+                    "status": "failed",
+                    "detail": str(exc),
+                },
+            )
 
         time.sleep(max(args.delay_ms, 0) / 1000.0)
 
@@ -370,6 +432,7 @@ def main() -> int:
         f"total records in bundle={len(ordered)}"
     )
     print(f"Wrote: {output_path}")
+    print(f"Wrote issues log: {issues_path}")
     return 0
 
 

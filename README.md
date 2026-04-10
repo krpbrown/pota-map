@@ -47,17 +47,18 @@ python -m pip install requests osm2geojson
 
 Build for specific states:
 
-```powershell
-python .\scripts\build_boundary_bundle.py --states UT CO AZ
+```bash
+python ./scripts/build_boundary_bundle.py --states UT CO AZ
 ```
 
 Build for all parks:
 
-```powershell
-python .\scripts\build_boundary_bundle.py --all
+```bash
+python ./scripts/build_boundary_bundle.py --all
 ```
 
 The script writes directly to `data/us-boundaries.json` (resume-friendly if rerun).
+Boundary issues are logged to `data/us-boundary-issues.jsonl` by default (no-boundary, failed, and similar-name fallback notes).
 
 ### Option B: In-browser export/import
 

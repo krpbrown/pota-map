@@ -99,6 +99,11 @@ body {
   background: #4f5f79;
 }
 
+#exportBoundaryBundleBtn,
+#importBoundaryBundleBtn {
+  background: #3f6a57;
+}
+
 #clearIssueLogBtn {
   background: #7a4c4c;
 }

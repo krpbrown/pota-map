@@ -32,3 +32,35 @@ This updates [`data/us-parks.json`](data/us-parks.json) from:
 - Boundary quality depends on OSM coverage and naming consistency.
 - Some references may return no polygon or multiple polygons.
 - Dispersed parks (like many national forests) can return multiple separated geometry parts.
+
+## Ship Local Boundary Bundle (Fast Startup)
+
+You can build and ship a local boundary bundle so runtime cache warming is minimal.
+
+### Option A: Scripted bulk build (recommended)
+
+Install script dependencies once:
+
+```powershell
+python -m pip install requests osm2geojson
+```
+
+Build for specific states:
+
+```powershell
+python .\scripts\build_boundary_bundle.py --states UT CO AZ
+```
+
+Build for all parks:
+
+```powershell
+python .\scripts\build_boundary_bundle.py --all
+```
+
+The script writes directly to `data/us-boundaries.json` (resume-friendly if rerun).
+
+### Option B: In-browser export/import
+
+- Use **Warm State Cache** and click **Export Boundaries**.
+- Later, use **Import Boundaries** to load that bundle.
+- Use **Export Log** to investigate `no-boundary` and `failed` entries.

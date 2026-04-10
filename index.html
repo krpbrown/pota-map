@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>POTA USA Boundary Map</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-  <link rel="stylesheet" href="styles.css?v=2026-04-10-1">
+  <link rel="stylesheet" href="styles.css?v=2026-04-10-2">
 </head>
 <body>
   <header class="topbar">
@@ -44,13 +44,16 @@
       <button id="toggleIssueLogBtn" type="button">View Issue Log</button>
       <button id="exportIssueLogBtn" type="button">Export Log</button>
       <button id="clearIssueLogBtn" type="button">Clear Log</button>
+      <button id="exportBoundaryBundleBtn" type="button">Export Boundaries</button>
+      <button id="importBoundaryBundleBtn" type="button">Import Boundaries</button>
     </div>
+    <input id="importBoundaryFileInput" type="file" accept="application/json" hidden>
     <div id="issueLogSummary" class="status muted"></div>
     <pre id="issueLogOutput" class="issue-log" hidden></pre>
   </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <script src="https://unpkg.com/osmtogeojson@3.0.0-beta.5/osmtogeojson.js" crossorigin=""></script>
-  <script src="app.js?v=2026-04-10-3"></script>
+  <script src="app.js?v=2026-04-10-6"></script>
 </body>
 </html>

@@ -10,6 +10,9 @@ const prefetchStatusEl = document.getElementById("prefetchStatus");
 const toggleIssueLogBtn = document.getElementById("toggleIssueLogBtn");
 const exportIssueLogBtn = document.getElementById("exportIssueLogBtn");
 const clearIssueLogBtn = document.getElementById("clearIssueLogBtn");
+const exportBoundaryBundleBtn = document.getElementById("exportBoundaryBundleBtn");
+const importBoundaryBundleBtn = document.getElementById("importBoundaryBundleBtn");
+const importBoundaryFileInput = document.getElementById("importBoundaryFileInput");
 const issueLogSummaryEl = document.getElementById("issueLogSummary");
 const issueLogOutputEl = document.getElementById("issueLogOutput");
 
@@ -59,6 +62,7 @@ const BOUNDARY_DB_NAME = "pota-boundary-cache";
 const BOUNDARY_DB_VERSION = 1;
 const BOUNDARY_STORE_NAME = "boundaries";
 const NO_BOUNDARY_CACHE_VERSION = 2;
+const BOUNDARY_BUNDLE_VERSION = 1;
 let boundaryDbPromise = null;
 const ISSUE_LOG_STORAGE_KEY = "pota-boundary-issue-log-v1";
 let issueLog = [];
@@ -225,6 +229,139 @@ async function dbWriteBoundary(reference, geojson) {
   });
 }
 
+async function dbReadAllBoundaries() {
+  const db = await openBoundaryDb();
+  if (!db) {
+    return [];
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(BOUNDARY_STORE_NAME, "readonly");
+    const store = tx.objectStore(BOUNDARY_STORE_NAME);
+    const request = store.getAll();
+    request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : []);
+    request.onerror = () => {
+      console.error("IndexedDB read-all failed", request.error);
+      resolve([]);
+    };
+  });
+}
+
+async function dbBulkWriteBoundaries(records) {
+  const db = await openBoundaryDb();
+  if (!db || !Array.isArray(records) || !records.length) {
+    return;
+  }
+  await new Promise((resolve) => {
+    const tx = db.transaction(BOUNDARY_STORE_NAME, "readwrite");
+    const store = tx.objectStore(BOUNDARY_STORE_NAME);
+    records.forEach((record) => {
+      if (!record?.reference) {
+        return;
+      }
+      store.put({
+        reference: record.reference,
+        geojson: record.geojson || null,
+        noBoundaryVersion: record.geojson ? null : (record.noBoundaryVersion || NO_BOUNDARY_CACHE_VERSION),
+        updatedAt: record.updatedAt || Date.now(),
+      });
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => {
+      console.error("IndexedDB bulk-write failed", tx.error);
+      resolve();
+    };
+    tx.onabort = () => {
+      console.error("IndexedDB bulk-write aborted", tx.error);
+      resolve();
+    };
+  });
+}
+
+function applyBoundaryRecordsToMemory(records) {
+  records.forEach((record) => {
+    if (!record?.reference) {
+      return;
+    }
+    if (record.geojson && record.geojson.features?.length) {
+      boundaryCache.set(record.reference, record.geojson);
+      noBoundaryCache.delete(record.reference);
+    } else if (record.noBoundaryVersion === NO_BOUNDARY_CACHE_VERSION) {
+      noBoundaryCache.add(record.reference);
+      boundaryCache.delete(record.reference);
+    }
+  });
+}
+
+async function exportBoundaryBundle() {
+  const records = await dbReadAllBoundaries();
+  const bundle = {
+    version: BOUNDARY_BUNDLE_VERSION,
+    generatedAt: new Date().toISOString(),
+    records: records.map((x) => ({
+      reference: x.reference,
+      geojson: x.geojson || null,
+      noBoundaryVersion: x.noBoundaryVersion || null,
+      updatedAt: x.updatedAt || null,
+    })),
+  };
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().replaceAll(":", "-");
+  a.href = url;
+  a.download = `pota-boundaries-${stamp}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importBoundaryBundleFromObject(bundle) {
+  const records = Array.isArray(bundle?.records) ? bundle.records : null;
+  if (!records) {
+    throw new Error("Invalid boundary bundle format (missing records array).");
+  }
+  await dbBulkWriteBoundaries(records);
+  applyBoundaryRecordsToMemory(records);
+  setPrefetchStatus(`Imported ${records.length.toLocaleString()} boundary record(s).`);
+}
+
+function importBoundaryBundleFromFile(file) {
+  if (!file) {
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const text = String(reader.result || "");
+      const parsed = JSON.parse(text);
+      await importBoundaryBundleFromObject(parsed);
+    } catch (err) {
+      console.error(err);
+      setPrefetchStatus(`Boundary import failed: ${err?.message || String(err)}`);
+    } finally {
+      importBoundaryFileInput.value = "";
+    }
+  };
+  reader.onerror = () => {
+    setPrefetchStatus("Boundary import failed: could not read file.");
+    importBoundaryFileInput.value = "";
+  };
+  reader.readAsText(file);
+}
+
+async function loadBundledBoundariesFile() {
+  try {
+    const response = await fetch("data/us-boundaries.json", { cache: "no-store" });
+    if (!response.ok) {
+      return;
+    }
+    const bundle = await response.json();
+    await importBoundaryBundleFromObject(bundle);
+  } catch (err) {
+    // Optional file; ignore when absent or invalid.
+    console.error("Bundled boundary load skipped", err);
+  }
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -264,7 +401,8 @@ function setCurrentPark(park) {
     <strong>${escapeHtml(park.reference)}</strong><br>
     ${escapeHtml(park.name)}<br>
     ${escapeHtml(park.location)}<br>
-    ${park.lat.toFixed(4)}, ${park.lon.toFixed(4)} (${escapeHtml(park.grid || "n/a")})
+    ${park.lat.toFixed(4)}, ${park.lon.toFixed(4)} (${escapeHtml(park.grid || "n/a")})<br>
+    <a href="https://pota.app/#/park/${encodeURIComponent(park.reference)}" target="_blank" rel="noopener noreferrer">View on POTA.app</a>
   `;
   setStatus("Park selected. Click “Load Boundary” to fetch polygons.");
   updateButtons();
@@ -287,8 +425,8 @@ function renderResults(matches) {
     btn.innerHTML = `<strong>${escapeHtml(park.reference)}</strong> ${escapeHtml(park.name)}`;
     btn.addEventListener("click", () => {
       setCurrentPark(park);
-      renderResults(matches);
       searchEl.value = `${park.reference} ${park.name}`;
+      renderResults([]);
     });
     resultsEl.appendChild(btn);
   });
@@ -732,6 +870,7 @@ async function loadParkIndex() {
     setPrefetchStatus("Tip: enter a state code and warm the boundary cache (saved for future reloads).");
     updateButtons();
     openBoundaryDb();
+    loadBundledBoundariesFile();
 
     const initialRef = (location.hash || "").replace("#", "").toUpperCase();
     if (initialRef) {
@@ -753,7 +892,7 @@ searchEl.addEventListener("keydown", (event) => {
     const matches = findMatches(searchEl.value);
     if (matches.length) {
       setCurrentPark(matches[0]);
-      renderResults(matches);
+      renderResults([]);
       searchEl.value = `${matches[0].reference} ${matches[0].name}`;
       location.hash = matches[0].reference;
     }
@@ -769,6 +908,12 @@ prefetchStateBtn.addEventListener("click", prefetchStateBoundaries);
 toggleIssueLogBtn.addEventListener("click", toggleIssueLog);
 clearIssueLogBtn.addEventListener("click", clearIssueLog);
 exportIssueLogBtn.addEventListener("click", exportIssueLog);
+exportBoundaryBundleBtn.addEventListener("click", exportBoundaryBundle);
+importBoundaryBundleBtn.addEventListener("click", () => importBoundaryFileInput.click());
+importBoundaryFileInput.addEventListener("change", () => {
+  const file = importBoundaryFileInput.files?.[0];
+  importBoundaryBundleFromFile(file);
+});
 stateCodeInputEl.addEventListener("input", () => {
   stateCodeInputEl.value = stateCodeInputEl.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
 });

@@ -58,6 +58,7 @@ let isPrefetching = false;
 const BOUNDARY_DB_NAME = "pota-boundary-cache";
 const BOUNDARY_DB_VERSION = 1;
 const BOUNDARY_STORE_NAME = "boundaries";
+const NO_BOUNDARY_CACHE_VERSION = 2;
 let boundaryDbPromise = null;
 const ISSUE_LOG_STORAGE_KEY = "pota-boundary-issue-log-v1";
 let issueLog = [];
@@ -209,6 +210,7 @@ async function dbWriteBoundary(reference, geojson) {
     store.put({
       reference,
       geojson: geojson || null,
+      noBoundaryVersion: geojson ? null : NO_BOUNDARY_CACHE_VERSION,
       updatedAt: Date.now(),
     });
     tx.oncomplete = () => resolve();
@@ -355,6 +357,43 @@ function featureCenter(feature) {
   return null;
 }
 
+function normalizeForNameMatch(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replaceAll("&", " and ")
+    .replace(/\bnational wildlife refuge\b/g, " ")
+    .replace(/\bnational wild and scenic river\b/g, " ")
+    .replace(/\bwild and scenic river\b/g, " ")
+    .replace(/\bnational historical park\b/g, " ")
+    .replace(/\bnational historic trail\b/g, " ")
+    .replace(/\bnational recreation area\b/g, " ")
+    .replace(/\bnational monument\b/g, " ")
+    .replace(/\bnational park\b/g, " ")
+    .replace(/\bnational forest\b/g, " ")
+    .replace(/\bstate park\b/g, " ")
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function nameSimilarityScore(a, b) {
+  const ta = new Set(normalizeForNameMatch(a).split(" ").filter(Boolean));
+  const tb = new Set(normalizeForNameMatch(b).split(" ").filter(Boolean));
+  if (!ta.size || !tb.size) {
+    return 0;
+  }
+
+  let intersection = 0;
+  for (const token of ta) {
+    if (tb.has(token)) {
+      intersection += 1;
+    }
+  }
+
+  // Prefer strong token overlap when one name is a superset of the other.
+  return intersection / Math.min(ta.size, tb.size);
+}
+
 function buildOverpassQuery(park, radiusMeters) {
   const name = park.name.replaceAll('"', '\\"');
   return `
@@ -370,6 +409,27 @@ out body;
 >;
 out skel qt;
 `.trim();
+}
+
+function buildOverpassBroadQuery(park, radiusMeters) {
+  return `
+[out:json][timeout:60];
+(
+  relation(around:${radiusMeters},${park.lat},${park.lon})["boundary"~"protected_area|national_park"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["leisure"="nature_reserve"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["boundary"~"protected_area|national_park"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["leisure"="nature_reserve"];
+);
+out body;
+>;
+out skel qt;
+`.trim();
+}
+
+function extractPolygonFeatures(geo) {
+  return (geo.features || []).filter(
+    (f) => f.geometry && (f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon"),
+  );
 }
 
 async function overpassRequest(query) {
@@ -405,16 +465,40 @@ async function fetchBoundaryGeoJson(park) {
   const first = await overpassRequest(buildOverpassQuery(park, radius));
 
   let geo = osmtogeojson(first);
-  let features = (geo.features || []).filter(
-    (f) => f.geometry && (f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon"),
-  );
+  let features = extractPolygonFeatures(geo);
 
   if (!features.length) {
     const fallback = await overpassRequest(buildOverpassQuery(park, 450000));
     geo = osmtogeojson(fallback);
-    features = (geo.features || []).filter(
-      (f) => f.geometry && (f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon"),
-    );
+    features = extractPolygonFeatures(geo);
+  }
+
+  // If exact name matching fails, look for nearby protected boundaries with similar names.
+  if (!features.length) {
+    const broad = await overpassRequest(buildOverpassBroadQuery(park, 180000));
+    geo = osmtogeojson(broad);
+    const candidates = extractPolygonFeatures(geo)
+      .map((f) => {
+        const candidateName = f.properties?.name || "";
+        const similarity = nameSimilarityScore(park.name, candidateName);
+        return { feature: f, similarity, candidateName };
+      })
+      .filter((x) => x.similarity >= 0.45)
+      .sort((a, b) => b.similarity - a.similarity);
+
+    if (candidates.length) {
+      features = candidates.slice(0, 20).map((x) => {
+        const note = `${park.reference} ${park.name}... found match ${x.candidateName}`;
+        return {
+          ...x.feature,
+          properties: {
+            ...(x.feature.properties || {}),
+            _potaMatchNote: note,
+            _potaSimilarity: x.similarity,
+          },
+        };
+      });
+    }
   }
 
   if (!features.length) {
@@ -438,7 +522,9 @@ async function fetchBoundaryGeoJson(park) {
       const boundary = f.properties?.boundary || "";
       const tagBonus = boundary === "protected_area" || boundary === "national_park" ? -50 : 0;
       const relationBonus = String(f.id || "").startsWith("relation/") ? -25 : 0;
-      return { feature: f, score: distance + tagBonus + relationBonus };
+      const similarity = Number(f.properties?._potaSimilarity || 0);
+      const similarityBonus = similarity > 0 ? -100 * similarity : 0;
+      return { feature: f, score: distance + tagBonus + relationBonus + similarityBonus };
     })
     .sort((a, b) => a.score - b.score);
 
@@ -485,8 +571,10 @@ async function getBoundaryWithCache(park) {
       boundaryCache.set(park.reference, persisted.geojson);
       return { geojson: persisted.geojson, source: "cache" };
     }
-    noBoundaryCache.add(park.reference);
-    return { geojson: null, source: "cache-none" };
+    if (persisted.noBoundaryVersion === NO_BOUNDARY_CACHE_VERSION) {
+      noBoundaryCache.add(park.reference);
+      return { geojson: null, source: "cache-none" };
+    }
   }
 
   const geojson = await fetchBoundaryGeoJson(park);
@@ -528,7 +616,10 @@ async function loadBoundary() {
       onEachFeature: (feature, layer) => {
         const name = feature.properties?.name || currentPark.name;
         const id = feature.id || "OSM feature";
-        layer.bindPopup(`<strong>${escapeHtml(name)}</strong><br>${escapeHtml(id)}`);
+        const note = feature.properties?._potaMatchNote
+          ? `<br><em>${escapeHtml(feature.properties._potaMatchNote)}</em>`
+          : "";
+        layer.bindPopup(`<strong>${escapeHtml(name)}</strong><br>${escapeHtml(id)}${note}`);
       },
     }).addTo(map);
 

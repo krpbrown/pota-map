@@ -530,8 +530,8 @@ function normalizeForNameMatch(value) {
     .toLowerCase()
     .replaceAll("&", " and ")
     .replace(/\bnational wildlife refuge\b/g, " ")
-    .replace(/\bnational wild and scenic river\b/g, " ")
-    .replace(/\bwild and scenic river\b/g, " ")
+    .replace(/\bnational wild and scenic river\b/g, " river ")
+    .replace(/\bwild and scenic river\b/g, " river ")
     .replace(/\bnational historical park\b/g, " ")
     .replace(/\bnational historic trail\b/g, " ")
     .replace(/\bnational recreation area\b/g, " ")
@@ -644,17 +644,32 @@ function riverCoreName(parkName) {
     .trim();
 }
 
+function riverNameVariants(parkName) {
+  const core = riverCoreName(parkName);
+  const variants = [String(parkName || "").trim()];
+  if (core) {
+    variants.push(`${core} River`);
+    variants.push(`North Fork ${core} River`);
+    variants.push(`South Fork ${core} River`);
+    variants.push(`${core} River Wilderness Study Area`);
+  }
+  return Array.from(new Set(variants.filter(Boolean)));
+}
+
 function buildRiverOverpassQuery(park, radiusMeters) {
-  const full = escapeOverpassRegex(park.name);
-  const core = escapeOverpassRegex(riverCoreName(park.name));
-  const pattern = core ? `(${full}|${core})` : full;
+  const pattern = riverNameVariants(park.name)
+    .map((name) => escapeOverpassRegex(name))
+    .join("|");
   return `
 [out:json][timeout:60];
 (
-  relation(around:${radiusMeters},${park.lat},${park.lon})["type"="waterway"]["name"~"${pattern}",i];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["waterway"="river"]["name"~"${pattern}",i];
-  way(around:${radiusMeters},${park.lat},${park.lon})["waterway"="river"]["name"~"${pattern}",i];
-  way(around:${radiusMeters},${park.lat},${park.lon})["waterway"]["name"~"${pattern}",i];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["type"="waterway"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["waterway"="river"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["waterway"="river"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
 );
 out body;
 >;
@@ -714,7 +729,7 @@ async function overpassRequest(query) {
 
 async function fetchBoundaryGeoJson(park) {
   if (isRiverPark(park)) {
-    const first = await overpassRequest(buildRiverOverpassQuery(park, 220000));
+    const first = await overpassRequest(buildRiverOverpassQuery(park, 160000));
     let geo = osmtogeojson(first);
     let features = extractFeaturesByMode(geo, "river")
       .map((f) => {
@@ -734,7 +749,7 @@ async function fetchBoundaryGeoJson(park) {
       }));
 
     if (!features.length) {
-      const fallback = await overpassRequest(buildRiverOverpassQuery(park, 420000));
+      const fallback = await overpassRequest(buildRiverOverpassQuery(park, 320000));
       geo = osmtogeojson(fallback);
       features = extractFeaturesByMode(geo, "river")
         .map((f) => {

@@ -110,8 +110,8 @@ def normalize_for_name_match(value: str) -> str:
     text = value.lower().replace("&", " and ")
     replacements = [
         r"\bnational wildlife refuge\b",
-        r"\bnational wild and scenic river\b",
-        r"\bwild and scenic river\b",
+        None,
+        None,
         r"\bnational historical park\b",
         r"\bnational historic trail\b",
         r"\bnational recreation area\b",
@@ -120,7 +120,11 @@ def normalize_for_name_match(value: str) -> str:
         r"\bnational forest\b",
         r"\bstate park\b",
     ]
+    text = re.sub(r"\bnational wild and scenic river\b", " river ", text)
+    text = re.sub(r"\bwild and scenic river\b", " river ", text)
     for pat in replacements:
+        if not pat:
+            continue
         text = re.sub(pat, " ", text)
     text = re.sub(r"[^a-z0-9 ]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -134,6 +138,27 @@ def river_core_name(park_name: str) -> str:
     text = re.sub(r"\bnational wild and scenic river\b", " ", park_name, flags=re.IGNORECASE)
     text = re.sub(r"\bwild and scenic river\b", " ", text, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def river_name_variants(park_name: str) -> list[str]:
+    core = river_core_name(park_name)
+    variants = [park_name.strip()]
+    if core:
+        variants.extend(
+            [
+                f"{core} River",
+                f"North Fork {core} River",
+                f"South Fork {core} River",
+                f"{core} River Wilderness Study Area",
+            ]
+        )
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in variants:
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
 
 
 def name_similarity_score(a: str, b: str) -> float:
@@ -199,16 +224,17 @@ def escape_overpass_regex(value: str) -> str:
 
 
 def build_river_query(park: Park, radius: int) -> str:
-    full = escape_overpass_regex(park.name)
-    core = escape_overpass_regex(river_core_name(park.name))
-    pattern = f"({full}|{core})" if core else full
+    pattern = "|".join(escape_overpass_regex(v) for v in river_name_variants(park.name))
     return f"""
 [out:json][timeout:60];
 (
-  relation(around:{radius},{park.lat},{park.lon})["type"="waterway"]["name"~"{pattern}",i];
-  relation(around:{radius},{park.lat},{park.lon})["waterway"="river"]["name"~"{pattern}",i];
-  way(around:{radius},{park.lat},{park.lon})["waterway"="river"]["name"~"{pattern}",i];
-  way(around:{radius},{park.lat},{park.lon})["waterway"]["name"~"{pattern}",i];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["type"="waterway"];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["waterway"="river"];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
+  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["waterway"="river"];
+  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
+  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
 );
 out body;
 >;
@@ -364,7 +390,7 @@ def annotate_and_rank_features(park: Park, features: list[dict[str, Any]]) -> li
 
 def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, Any] | None:
     if is_river_park(park):
-        first = overpass_request(build_river_query(park, 220000), retries=retries, timeout=timeout)
+        first = overpass_request(build_river_query(park, 160000), retries=retries, timeout=timeout)
         geo = to_geojson(first)
         features: list[dict[str, Any]] = []
         for feature in extract_features_by_mode(geo, "river"):
@@ -380,7 +406,7 @@ def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, 
                 features.append(feature)
 
         if not features:
-            second = overpass_request(build_river_query(park, 420000), retries=retries, timeout=timeout)
+            second = overpass_request(build_river_query(park, 320000), retries=retries, timeout=timeout)
             geo = to_geojson(second)
             for feature in extract_features_by_mode(geo, "river"):
                 candidate_name = str((feature.get("properties") or {}).get("name") or "")

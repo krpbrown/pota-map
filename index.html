@@ -24,15 +24,6 @@
         <button id="clearBoundaryBtn" disabled>Clear Boundary</button>
       </div>
 
-      <div class="prefetch">
-        <label for="stateCodeInput">State Boundary Cache</label>
-        <div class="actions">
-          <input id="stateCodeInput" type="text" maxlength="2" placeholder="Example: CO">
-          <button id="prefetchStateBtn" disabled>Warm State Cache</button>
-        </div>
-        <div id="prefetchStatus" class="status muted"></div>
-      </div>
-
       <div id="status" class="status">Loading park index...</div>
       <div id="details" class="details"></div>
     </section>
@@ -41,6 +32,15 @@
       <div id="map" aria-label="POTA park map"></div>
     </section>
   </main>
+
+  <section class="prefetch prefetch-bottom">
+    <label for="stateCodeInput">State Boundary Cache</label>
+    <div class="actions">
+      <input id="stateCodeInput" type="text" maxlength="2" placeholder="Example: CO">
+      <button id="prefetchStateBtn">Warm State Cache</button>
+    </div>
+    <div id="prefetchStatus" class="status muted"></div>
+  </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <script src="https://unpkg.com/osmtogeojson@3.0.0-beta.5/osmtogeojson.js" crossorigin=""></script>

@@ -55,7 +55,7 @@ function escapeHtml(value) {
 function updateButtons() {
   loadBoundaryBtn.disabled = !currentPark;
   clearBoundaryBtn.disabled = !boundaryLayer;
-  prefetchStateBtn.disabled = isPrefetching || !parks.length;
+  prefetchStateBtn.disabled = isPrefetching;
 }
 
 function clearBoundary() {
@@ -353,6 +353,15 @@ async function loadBoundary() {
 }
 
 async function prefetchStateBoundaries() {
+  if (!parks.length) {
+    setPrefetchStatus("Park index not loaded yet. Loading now...");
+    await loadParkIndex();
+    if (!parks.length) {
+      setPrefetchStatus("Park index is unavailable; cannot warm state cache yet.");
+      return;
+    }
+  }
+
   const stateCode = normalizeStateCode(stateCodeInputEl.value);
   if (!stateCode) {
     setPrefetchStatus("Enter a 2-letter state code (for example: CO).");

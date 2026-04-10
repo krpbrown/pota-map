@@ -67,6 +67,15 @@ body {
   border-top: 1px dashed var(--border);
 }
 
+.prefetch-bottom {
+  margin: 0 1rem 1rem;
+  padding: 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .prefetch .actions {
   align-items: center;
 }

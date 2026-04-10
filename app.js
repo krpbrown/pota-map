@@ -7,6 +7,11 @@ const clearBoundaryBtn = document.getElementById("clearBoundaryBtn");
 const stateCodeInputEl = document.getElementById("stateCodeInput");
 const prefetchStateBtn = document.getElementById("prefetchStateBtn");
 const prefetchStatusEl = document.getElementById("prefetchStatus");
+const toggleIssueLogBtn = document.getElementById("toggleIssueLogBtn");
+const exportIssueLogBtn = document.getElementById("exportIssueLogBtn");
+const clearIssueLogBtn = document.getElementById("clearIssueLogBtn");
+const issueLogSummaryEl = document.getElementById("issueLogSummary");
+const issueLogOutputEl = document.getElementById("issueLogOutput");
 
 // If the user pressed browser reload, force a cache-busted navigation once.
 (() => {
@@ -50,6 +55,12 @@ let boundaryLayer = null;
 const boundaryCache = new Map();
 const noBoundaryCache = new Set();
 let isPrefetching = false;
+const BOUNDARY_DB_NAME = "pota-boundary-cache";
+const BOUNDARY_DB_VERSION = 1;
+const BOUNDARY_STORE_NAME = "boundaries";
+let boundaryDbPromise = null;
+const ISSUE_LOG_STORAGE_KEY = "pota-boundary-issue-log-v1";
+let issueLog = [];
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -57,6 +68,159 @@ function setStatus(message) {
 
 function setPrefetchStatus(message) {
   prefetchStatusEl.textContent = message;
+}
+
+function loadIssueLog() {
+  try {
+    const raw = localStorage.getItem(ISSUE_LOG_STORAGE_KEY);
+    if (!raw) {
+      issueLog = [];
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    issueLog = Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.error("Issue log load failed", err);
+    issueLog = [];
+  }
+}
+
+function saveIssueLog() {
+  try {
+    localStorage.setItem(ISSUE_LOG_STORAGE_KEY, JSON.stringify(issueLog));
+  } catch (err) {
+    console.error("Issue log save failed", err);
+  }
+}
+
+function summarizeIssueLog() {
+  const noBoundary = issueLog.filter((x) => x.status === "no-boundary").length;
+  const failed = issueLog.filter((x) => x.status === "failed").length;
+  return { total: issueLog.length, noBoundary, failed };
+}
+
+function formatIssueLogEntries(entries) {
+  if (!entries.length) {
+    return "No issue entries yet.";
+  }
+  return entries
+    .slice()
+    .reverse()
+    .map((entry) => {
+      const time = new Date(entry.timestamp).toLocaleString();
+      const base = `${time} | ${entry.state} | ${entry.reference} | ${entry.name} | ${entry.status}`;
+      if (entry.error) {
+        return `${base} | ${entry.error}`;
+      }
+      return base;
+    })
+    .join("\n");
+}
+
+function renderIssueLog() {
+  const summary = summarizeIssueLog();
+  issueLogSummaryEl.textContent = `Issue log entries: ${summary.total} (no-boundary ${summary.noBoundary}, failed ${summary.failed})`;
+  issueLogOutputEl.textContent = formatIssueLogEntries(issueLog);
+}
+
+function appendIssueLogEntry(entry) {
+  issueLog.push(entry);
+  // Keep recent history bounded.
+  if (issueLog.length > 5000) {
+    issueLog = issueLog.slice(issueLog.length - 5000);
+  }
+  saveIssueLog();
+  renderIssueLog();
+}
+
+function clearIssueLog() {
+  issueLog = [];
+  saveIssueLog();
+  renderIssueLog();
+}
+
+function toggleIssueLog() {
+  issueLogOutputEl.hidden = !issueLogOutputEl.hidden;
+  toggleIssueLogBtn.textContent = issueLogOutputEl.hidden ? "View Issue Log" : "Hide Issue Log";
+}
+
+function exportIssueLog() {
+  const blob = new Blob([JSON.stringify(issueLog, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().replaceAll(":", "-");
+  a.href = url;
+  a.download = `pota-boundary-issue-log-${stamp}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function openBoundaryDb() {
+  if (!("indexedDB" in window)) {
+    return Promise.resolve(null);
+  }
+  if (boundaryDbPromise) {
+    return boundaryDbPromise;
+  }
+
+  boundaryDbPromise = new Promise((resolve) => {
+    const request = indexedDB.open(BOUNDARY_DB_NAME, BOUNDARY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(BOUNDARY_STORE_NAME)) {
+        db.createObjectStore(BOUNDARY_STORE_NAME, { keyPath: "reference" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      console.error("IndexedDB open failed", request.error);
+      resolve(null);
+    };
+  });
+
+  return boundaryDbPromise;
+}
+
+async function dbReadBoundary(reference) {
+  const db = await openBoundaryDb();
+  if (!db) {
+    return null;
+  }
+  return new Promise((resolve) => {
+    const tx = db.transaction(BOUNDARY_STORE_NAME, "readonly");
+    const store = tx.objectStore(BOUNDARY_STORE_NAME);
+    const request = store.get(reference);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => {
+      console.error("IndexedDB read failed", request.error);
+      resolve(null);
+    };
+  });
+}
+
+async function dbWriteBoundary(reference, geojson) {
+  const db = await openBoundaryDb();
+  if (!db) {
+    return;
+  }
+  await new Promise((resolve) => {
+    const tx = db.transaction(BOUNDARY_STORE_NAME, "readwrite");
+    const store = tx.objectStore(BOUNDARY_STORE_NAME);
+    store.put({
+      reference,
+      geojson: geojson || null,
+      updatedAt: Date.now(),
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => {
+      console.error("IndexedDB write failed", tx.error);
+      resolve();
+    };
+    tx.onabort = () => {
+      console.error("IndexedDB write aborted", tx.error);
+      resolve();
+    };
+  });
 }
 
 function escapeHtml(value) {
@@ -315,11 +479,23 @@ async function getBoundaryWithCache(park) {
     return { geojson: null, source: "cache-none" };
   }
 
+  const persisted = await dbReadBoundary(park.reference);
+  if (persisted) {
+    if (persisted.geojson && persisted.geojson.features?.length) {
+      boundaryCache.set(park.reference, persisted.geojson);
+      return { geojson: persisted.geojson, source: "cache" };
+    }
+    noBoundaryCache.add(park.reference);
+    return { geojson: null, source: "cache-none" };
+  }
+
   const geojson = await fetchBoundaryGeoJson(park);
   if (geojson && geojson.features?.length) {
     boundaryCache.set(park.reference, geojson);
+    await dbWriteBoundary(park.reference, geojson);
   } else {
     noBoundaryCache.add(park.reference);
+    await dbWriteBoundary(park.reference, null);
   }
   return { geojson, source: "network" };
 }
@@ -413,10 +589,26 @@ async function prefetchStateBoundaries() {
           fetchedCount += 1;
         } else {
           missingCount += 1;
+          appendIssueLogEntry({
+            timestamp: Date.now(),
+            state: `US-${stateCode}`,
+            reference: park.reference,
+            name: park.name,
+            status: "no-boundary",
+            error: "",
+          });
         }
       } catch (err) {
         console.error(err);
         failedCount += 1;
+        appendIssueLogEntry({
+          timestamp: Date.now(),
+          state: `US-${stateCode}`,
+          reference: park.reference,
+          name: park.name,
+          status: "failed",
+          error: err?.message || String(err),
+        });
       }
 
       setPrefetchStatus(
@@ -446,8 +638,9 @@ async function loadParkIndex() {
     parks = await response.json();
     parks.sort((a, b) => (a.reference < b.reference ? -1 : 1));
     setStatus(`Loaded ${parks.length.toLocaleString()} U.S. active POTA parks.`);
-    setPrefetchStatus("Tip: enter a state code and warm the boundary cache.");
+    setPrefetchStatus("Tip: enter a state code and warm the boundary cache (saved for future reloads).");
     updateButtons();
+    openBoundaryDb();
 
     const initialRef = (location.hash || "").replace("#", "").toUpperCase();
     if (initialRef) {
@@ -482,6 +675,9 @@ clearBoundaryBtn.addEventListener("click", () => {
   setStatus("Boundary cleared.");
 });
 prefetchStateBtn.addEventListener("click", prefetchStateBoundaries);
+toggleIssueLogBtn.addEventListener("click", toggleIssueLog);
+clearIssueLogBtn.addEventListener("click", clearIssueLog);
+exportIssueLogBtn.addEventListener("click", exportIssueLog);
 stateCodeInputEl.addEventListener("input", () => {
   stateCodeInputEl.value = stateCodeInputEl.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
 });
@@ -491,4 +687,6 @@ stateCodeInputEl.addEventListener("keydown", (event) => {
   }
 });
 
+loadIssueLog();
+renderIssueLog();
 loadParkIndex();

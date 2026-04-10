@@ -40,6 +40,13 @@
       <button id="prefetchStateBtn">Warm State Cache</button>
     </div>
     <div id="prefetchStatus" class="status muted"></div>
+    <div class="actions log-actions">
+      <button id="toggleIssueLogBtn" type="button">View Issue Log</button>
+      <button id="exportIssueLogBtn" type="button">Export Log</button>
+      <button id="clearIssueLogBtn" type="button">Clear Log</button>
+    </div>
+    <div id="issueLogSummary" class="status muted"></div>
+    <pre id="issueLogOutput" class="issue-log" hidden></pre>
   </section>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>

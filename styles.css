@@ -90,8 +90,34 @@ body {
   background: #295f9e;
 }
 
+.log-actions {
+  margin-top: 0.6rem;
+}
+
+#toggleIssueLogBtn,
+#exportIssueLogBtn {
+  background: #4f5f79;
+}
+
+#clearIssueLogBtn {
+  background: #7a4c4c;
+}
+
 .status.muted {
   color: var(--muted);
+}
+
+.issue-log {
+  margin-top: 0.5rem;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: #f7faf8;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.65rem;
+  color: #2d443d;
+  font-size: 0.85rem;
 }
 
 .results {

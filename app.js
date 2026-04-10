@@ -514,6 +514,18 @@ function normalizeForNameMatch(value) {
     .trim();
 }
 
+const WATERBODY_TOKENS = new Set([
+  "river",
+  "lake",
+  "creek",
+  "canyon",
+  "fork",
+  "bay",
+  "gulf",
+  "reservoir",
+  "stream",
+]);
+
 function nameSimilarityScore(a, b) {
   const ta = new Set(normalizeForNameMatch(a).split(" ").filter(Boolean));
   const tb = new Set(normalizeForNameMatch(b).split(" ").filter(Boolean));
@@ -525,6 +537,20 @@ function nameSimilarityScore(a, b) {
   for (const token of ta) {
     if (tb.has(token)) {
       intersection += 1;
+    }
+  }
+
+  // Avoid false positives from only one shared generic token (e.g. "Bear Lake" vs "Bear River").
+  if (intersection < 2) {
+    return 0;
+  }
+
+  const waterA = new Set(Array.from(ta).filter((t) => WATERBODY_TOKENS.has(t)));
+  const waterB = new Set(Array.from(tb).filter((t) => WATERBODY_TOKENS.has(t)));
+  if (waterA.size && waterB.size) {
+    const sharedWater = Array.from(waterA).some((token) => waterB.has(token));
+    if (!sharedWater) {
+      return 0;
     }
   }
 
@@ -621,7 +647,7 @@ async function fetchBoundaryGeoJson(park) {
         const similarity = nameSimilarityScore(park.name, candidateName);
         return { feature: f, similarity, candidateName };
       })
-      .filter((x) => x.similarity >= 0.45)
+      .filter((x) => x.similarity >= 0.55)
       .sort((a, b) => b.similarity - a.similarity);
 
     if (candidates.length) {

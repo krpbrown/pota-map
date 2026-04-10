@@ -36,6 +36,17 @@ ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
 ]
 NO_BOUNDARY_CACHE_VERSION = 2
+WATERBODY_TOKENS = {
+    "river",
+    "lake",
+    "creek",
+    "canyon",
+    "fork",
+    "bay",
+    "gulf",
+    "reservoir",
+    "stream",
+}
 
 
 @dataclass
@@ -57,6 +68,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--max", type=int, default=0, help="Limit number of parks (0 = no limit)")
+    parser.add_argument(
+        "--force-refs",
+        nargs="*",
+        default=[],
+        help="Specific references to reprocess even if already present (e.g. US-0557)",
+    )
     parser.add_argument(
         "--issues-log",
         default="data/us-boundary-issues.jsonl",
@@ -112,6 +129,14 @@ def name_similarity_score(a: str, b: str) -> float:
     if not ta or not tb:
         return 0.0
     intersection = len(ta.intersection(tb))
+    if intersection < 2:
+        return 0.0
+
+    water_a = {t for t in ta if t in WATERBODY_TOKENS}
+    water_b = {t for t in tb if t in WATERBODY_TOKENS}
+    if water_a and water_b and not water_a.intersection(water_b):
+        return 0.0
+
     return intersection / min(len(ta), len(tb))
 
 
@@ -264,7 +289,7 @@ def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, 
         for feature in extract_polygon_features(geo):
             candidate_name = str((feature.get("properties") or {}).get("name") or "")
             similarity = name_similarity_score(park.name, candidate_name)
-            if similarity >= 0.45:
+            if similarity >= 0.55:
                 props = dict(feature.get("properties") or {})
                 props["_potaMatchNote"] = (
                     f"{park.reference} {park.name}... found match {candidate_name}"
@@ -330,6 +355,7 @@ def main() -> int:
 
     output_path = Path(args.output)
     existing = load_existing_records(output_path)
+    force_refs = {ref.strip().upper() for ref in args.force_refs if ref.strip()}
 
     fetched = 0
     no_boundary = 0
@@ -341,8 +367,11 @@ def main() -> int:
 
     for idx, park in enumerate(parks, start=1):
         if park.reference in existing:
-            print(f"[{idx}/{total}] {park.reference} | {park.name} -> skip (already in bundle)")
-            continue
+            if park.reference in force_refs:
+                print(f"[{idx}/{total}] {park.reference} | {park.name} -> force reprocess")
+            else:
+                print(f"[{idx}/{total}] {park.reference} | {park.name} -> skip (already in bundle)")
+                continue
 
         try:
             geojson = fetch_boundary_geojson(park, retries=args.retries, timeout=args.timeout)

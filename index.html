@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>POTA USA Boundary Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>POTA USA Boundary Map</h1>
+    <p>Search a U.S. POTA park and draw park boundaries (when available) instead of only a point.</p>
+  </header>
+
+  <main class="layout">
+    <section class="panel">
+      <label for="parkSearch">Park Reference or Name</label>
+      <input id="parkSearch" type="text" placeholder="Example: US-3062 or Antelope Island">
+      <div id="results" class="results"></div>
+
+      <div class="actions">
+        <button id="loadBoundaryBtn" disabled>Load Boundary</button>
+        <button id="clearBoundaryBtn" disabled>Clear Boundary</button>
+      </div>
+
+      <div id="status" class="status">Loading park index...</div>
+      <div id="details" class="details"></div>
+    </section>
+
+    <section class="mapwrap">
+      <div id="map" aria-label="POTA park map"></div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://unpkg.com/osmtogeojson@3.0.0-beta.5/osmtogeojson.js" crossorigin=""></script>
+  <script src="app.js"></script>
+</body>
+</html>

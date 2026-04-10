@@ -1,0 +1,153 @@
+:root {
+  --bg: #f4f8f5;
+  --panel: #ffffff;
+  --ink: #1e2a26;
+  --muted: #557066;
+  --brand: #1d7f5f;
+  --brand-2: #114e3a;
+  --border: #c8dad2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  color: var(--ink);
+  background: linear-gradient(180deg, #edf5f1 0%, #f8fbf9 100%);
+}
+
+.topbar {
+  padding: 1rem 1rem 0.7rem;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.topbar p {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 1rem;
+  padding: 0 1rem 1rem;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem;
+}
+
+.panel label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.panel input {
+  width: 100%;
+  margin-top: 0.35rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.results {
+  margin-top: 0.6rem;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.result {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid #e3ece8;
+  background: #fff;
+  color: var(--ink);
+  padding: 0.55rem 0.65rem;
+  cursor: pointer;
+}
+
+.result:last-child {
+  border-bottom: 0;
+}
+
+.result:hover {
+  background: #eef6f2;
+}
+
+.result.active {
+  background: #dff2eb;
+}
+
+.actions {
+  display: flex;
+  gap: 0.55rem;
+  margin-top: 0.7rem;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  background: var(--brand);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #94b3a8;
+  cursor: not-allowed;
+}
+
+#clearBoundaryBtn {
+  background: #6d7c76;
+}
+
+.status {
+  margin-top: 0.7rem;
+  color: var(--brand-2);
+  font-size: 0.9rem;
+}
+
+.details {
+  margin-top: 0.7rem;
+  font-size: 0.9rem;
+  color: #2f4a41;
+  line-height: 1.35;
+}
+
+.mapwrap {
+  min-height: 70vh;
+}
+
+#map {
+  width: 100%;
+  height: 100%;
+  min-height: 70vh;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .mapwrap,
+  #map {
+    min-height: 60vh;
+  }
+}

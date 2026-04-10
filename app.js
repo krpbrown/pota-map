@@ -13,6 +13,7 @@ const clearIssueLogBtn = document.getElementById("clearIssueLogBtn");
 const exportBoundaryBundleBtn = document.getElementById("exportBoundaryBundleBtn");
 const importBoundaryBundleBtn = document.getElementById("importBoundaryBundleBtn");
 const importBoundaryFileInput = document.getElementById("importBoundaryFileInput");
+const clearSessionCacheBtn = document.getElementById("clearSessionCacheBtn");
 const issueLogSummaryEl = document.getElementById("issueLogSummary");
 const issueLogOutputEl = document.getElementById("issueLogOutput");
 
@@ -66,6 +67,7 @@ const BOUNDARY_BUNDLE_VERSION = 1;
 let boundaryDbPromise = null;
 const ISSUE_LOG_STORAGE_KEY = "pota-boundary-issue-log-v1";
 let issueLog = [];
+let sessionIgnorePersistedCache = false;
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -158,6 +160,13 @@ function exportIssueLog() {
   a.download = `pota-boundary-issue-log-${stamp}.json`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function clearSessionCache() {
+  boundaryCache.clear();
+  noBoundaryCache.clear();
+  sessionIgnorePersistedCache = true;
+  setPrefetchStatus("Session cache cleared. Persisted cache is ignored until page refresh.");
 }
 
 function openBoundaryDb() {
@@ -872,15 +881,17 @@ async function getBoundaryWithCache(park) {
     return { geojson: null, source: "cache-none" };
   }
 
-  const persisted = await dbReadBoundary(park.reference);
-  if (persisted) {
-    if (persisted.geojson && persisted.geojson.features?.length) {
-      boundaryCache.set(park.reference, persisted.geojson);
-      return { geojson: persisted.geojson, source: "cache" };
-    }
-    if (persisted.noBoundaryVersion === NO_BOUNDARY_CACHE_VERSION) {
-      noBoundaryCache.add(park.reference);
-      return { geojson: null, source: "cache-none" };
+  if (!sessionIgnorePersistedCache) {
+    const persisted = await dbReadBoundary(park.reference);
+    if (persisted) {
+      if (persisted.geojson && persisted.geojson.features?.length) {
+        boundaryCache.set(park.reference, persisted.geojson);
+        return { geojson: persisted.geojson, source: "cache" };
+      }
+      if (persisted.noBoundaryVersion === NO_BOUNDARY_CACHE_VERSION) {
+        noBoundaryCache.add(park.reference);
+        return { geojson: null, source: "cache-none" };
+      }
     }
   }
 
@@ -1094,6 +1105,7 @@ importBoundaryFileInput.addEventListener("change", () => {
   const file = importBoundaryFileInput.files?.[0];
   importBoundaryBundleFromFile(file);
 });
+clearSessionCacheBtn.addEventListener("click", clearSessionCache);
 stateCodeInputEl.addEventListener("input", () => {
   stateCodeInputEl.value = stateCodeInputEl.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
 });

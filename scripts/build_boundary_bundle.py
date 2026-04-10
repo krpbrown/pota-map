@@ -10,6 +10,9 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import copy
+import io
 import json
 import math
 import re
@@ -123,6 +126,16 @@ def normalize_for_name_match(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def is_river_park(park: Park) -> bool:
+    return bool(re.search(r"wild and scenic river", park.name, flags=re.IGNORECASE))
+
+
+def river_core_name(park_name: str) -> str:
+    text = re.sub(r"\bnational wild and scenic river\b", " ", park_name, flags=re.IGNORECASE)
+    text = re.sub(r"\bwild and scenic river\b", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def name_similarity_score(a: str, b: str) -> float:
     ta = set(normalize_for_name_match(a).split())
     tb = set(normalize_for_name_match(b).split())
@@ -141,15 +154,22 @@ def name_similarity_score(a: str, b: str) -> float:
 
 
 def build_exact_query(park: Park, radius: int) -> str:
-    name = park.name.replace('"', '\\"')
+    variants = [park.name]
+    if re.search(r"state park", park.name, flags=re.IGNORECASE) and not re.search(
+        r"museum", park.name, flags=re.IGNORECASE
+    ):
+        variants.append(f"{park.name} and Museum")
+    pattern = "|".join(escape_overpass_regex(v) for v in variants)
     return f"""
 [out:json][timeout:60];
 (
-  relation(around:{radius},{park.lat},{park.lon})["name"="{name}"]["boundary"~"protected_area|national_park"];
-  relation(around:{radius},{park.lat},{park.lon})["name"="{name}"]["leisure"="nature_reserve"];
-  relation(around:{radius},{park.lat},{park.lon})["name"="{name}"]["type"="boundary"];
-  way(around:{radius},{park.lat},{park.lon})["name"="{name}"]["boundary"~"protected_area|national_park"];
-  way(around:{radius},{park.lat},{park.lon})["name"="{name}"]["leisure"="nature_reserve"];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["type"="boundary"];
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];
+  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
+  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
+  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];
 );
 out body;
 >;
@@ -163,8 +183,32 @@ def build_broad_query(park: Park, radius: int) -> str:
 (
   relation(around:{radius},{park.lat},{park.lon})["boundary"~"protected_area|national_park"];
   relation(around:{radius},{park.lat},{park.lon})["leisure"="nature_reserve"];
+  relation(around:{radius},{park.lat},{park.lon})["leisure"="park"];
   way(around:{radius},{park.lat},{park.lon})["boundary"~"protected_area|national_park"];
   way(around:{radius},{park.lat},{park.lon})["leisure"="nature_reserve"];
+  way(around:{radius},{park.lat},{park.lon})["leisure"="park"];
+);
+out body;
+>;
+out skel qt;
+""".strip()
+
+
+def escape_overpass_regex(value: str) -> str:
+    return re.escape(value)
+
+
+def build_river_query(park: Park, radius: int) -> str:
+    full = escape_overpass_regex(park.name)
+    core = escape_overpass_regex(river_core_name(park.name))
+    pattern = f"({full}|{core})" if core else full
+    return f"""
+[out:json][timeout:60];
+(
+  relation(around:{radius},{park.lat},{park.lon})["type"="waterway"]["name"~"{pattern}",i];
+  relation(around:{radius},{park.lat},{park.lon})["waterway"="river"]["name"~"{pattern}",i];
+  way(around:{radius},{park.lat},{park.lon})["waterway"="river"]["name"~"{pattern}",i];
+  way(around:{radius},{park.lat},{park.lon})["waterway"]["name"~"{pattern}",i];
 );
 out body;
 >;
@@ -187,7 +231,11 @@ def overpass_request(query: str, retries: int, timeout: int) -> dict[str, Any]:
                     time.sleep(3 + attempt * 2)
                     continue
                 response.raise_for_status()
-                return response.json()
+                payload = response.json()
+                remark = str(payload.get("remark", "")) if isinstance(payload, dict) else ""
+                if remark and re.search(r"runtime error|timed out|too busy|Dispatcher_Client", remark, flags=re.IGNORECASE):
+                    raise RuntimeError(f"Overpass remark from {endpoint}: {remark}")
+                return payload
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 time.sleep(1.5 + attempt)
@@ -197,7 +245,35 @@ def overpass_request(query: str, retries: int, timeout: int) -> dict[str, Any]:
 
 
 def to_geojson(overpass_json: dict[str, Any]) -> dict[str, Any]:
-    return osm2geojson.json2geojson(overpass_json)
+    # Some OSM relations can contain invalid topology. The conversion library may
+    # emit noisy GEOS diagnostics or raise; when possible, drop only bad relation
+    # ids and retry so one broken relation does not fail the whole park.
+    payload = copy.deepcopy(overpass_json)
+    last_error: Exception | None = None
+    for _ in range(4):
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(buf), contextlib.redirect_stdout(buf):
+                return osm2geojson.json2geojson(payload)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            diagnostic = f"{buf.getvalue()}\n{exc}"
+            rel_ids = {
+                int(x)
+                for x in re.findall(r"(?:'id'|\"id\")\s*:\s*(\d+)", diagnostic)
+                if x.isdigit()
+            }
+            if not rel_ids:
+                break
+            elements = payload.get("elements", [])
+            payload["elements"] = [
+                e
+                for e in elements
+                if not (e.get("type") == "relation" and int(e.get("id", -1)) in rel_ids)
+            ]
+    if last_error is None:
+        raise RuntimeError("osm2geojson conversion failed with unknown error")
+    raise last_error
 
 
 def extract_polygon_features(geojson: dict[str, Any]) -> list[dict[str, Any]]:
@@ -207,6 +283,17 @@ def extract_polygon_features(geojson: dict[str, Any]) -> list[dict[str, Any]]:
         for f in features
         if f.get("geometry", {}).get("type") in {"Polygon", "MultiPolygon"}
     ]
+
+def extract_features_by_mode(geojson: dict[str, Any], mode: str) -> list[dict[str, Any]]:
+    features = geojson.get("features", [])
+    if mode == "river":
+        return [
+            f
+            for f in features
+            if f.get("geometry", {}).get("type")
+            in {"LineString", "MultiLineString", "Polygon", "MultiPolygon"}
+        ]
+    return extract_polygon_features(geojson)
 
 
 def ring_centroid(coords: Iterable[list[float]]) -> tuple[float, float] | None:
@@ -230,6 +317,10 @@ def feature_center(feature: dict[str, Any]) -> tuple[float, float] | None:
         return ring_centroid(coords[0])
     if gtype == "MultiPolygon" and coords and coords[0] and coords[0][0]:
         return ring_centroid(coords[0][0])
+    if gtype == "LineString" and coords:
+        return ring_centroid(coords)
+    if gtype == "MultiLineString" and coords and coords[0]:
+        return ring_centroid(coords[0])
     return None
 
 
@@ -272,6 +363,43 @@ def annotate_and_rank_features(park: Park, features: list[dict[str, Any]]) -> li
 
 
 def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, Any] | None:
+    if is_river_park(park):
+        first = overpass_request(build_river_query(park, 220000), retries=retries, timeout=timeout)
+        geo = to_geojson(first)
+        features: list[dict[str, Any]] = []
+        for feature in extract_features_by_mode(geo, "river"):
+            candidate_name = str((feature.get("properties") or {}).get("name") or "")
+            similarity = name_similarity_score(park.name, candidate_name)
+            if similarity >= 0.5:
+                props = dict(feature.get("properties") or {})
+                props["_potaMatchNote"] = (
+                    f"{park.reference} {park.name}... found match {candidate_name}"
+                )
+                props["_potaSimilarity"] = similarity
+                feature["properties"] = props
+                features.append(feature)
+
+        if not features:
+            second = overpass_request(build_river_query(park, 420000), retries=retries, timeout=timeout)
+            geo = to_geojson(second)
+            for feature in extract_features_by_mode(geo, "river"):
+                candidate_name = str((feature.get("properties") or {}).get("name") or "")
+                similarity = name_similarity_score(park.name, candidate_name)
+                if similarity >= 0.5:
+                    props = dict(feature.get("properties") or {})
+                    props["_potaMatchNote"] = (
+                        f"{park.reference} {park.name}... found match {candidate_name}"
+                    )
+                    props["_potaSimilarity"] = similarity
+                    feature["properties"] = props
+                    features.append(feature)
+
+        if not features:
+            return None
+
+        final_features = annotate_and_rank_features(park, features)
+        return {"type": "FeatureCollection", "features": final_features}
+
     radius = 350000 if "National Forest" in park.name else 120000
     first = overpass_request(build_exact_query(park, radius), retries=retries, timeout=timeout)
     geo = to_geojson(first)

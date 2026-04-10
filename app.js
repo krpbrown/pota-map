@@ -481,6 +481,21 @@ function ringCentroid(coords) {
   return [latTotal / count, lonTotal / count];
 }
 
+function lineCentroid(coords) {
+  let latTotal = 0;
+  let lonTotal = 0;
+  let count = 0;
+  coords.forEach((p) => {
+    lonTotal += p[0];
+    latTotal += p[1];
+    count += 1;
+  });
+  if (!count) {
+    return null;
+  }
+  return [latTotal / count, lonTotal / count];
+}
+
 function featureCenter(feature) {
   if (!feature || !feature.geometry) {
     return null;
@@ -491,6 +506,12 @@ function featureCenter(feature) {
   }
   if (g.type === "MultiPolygon" && g.coordinates?.[0]?.[0]) {
     return ringCentroid(g.coordinates[0][0]);
+  }
+  if (g.type === "LineString" && g.coordinates) {
+    return lineCentroid(g.coordinates);
+  }
+  if (g.type === "MultiLineString" && g.coordinates?.[0]) {
+    return lineCentroid(g.coordinates[0]);
   }
   return null;
 }
@@ -559,15 +580,21 @@ function nameSimilarityScore(a, b) {
 }
 
 function buildOverpassQuery(park, radiusMeters) {
-  const name = park.name.replaceAll('"', '\\"');
+  const variants = [park.name];
+  if (/state park/i.test(park.name) && !/museum/i.test(park.name)) {
+    variants.push(`${park.name} and Museum`);
+  }
+  const pattern = variants.map((v) => escapeOverpassRegex(v)).join("|");
   return `
 [out:json][timeout:45];
 (
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["boundary"~"protected_area|national_park"];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["leisure"="nature_reserve"];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["type"="boundary"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["boundary"~"protected_area|national_park"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["name"="${name}"]["leisure"="nature_reserve"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["type"="boundary"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];
 );
 out body;
 >;
@@ -581,8 +608,10 @@ function buildOverpassBroadQuery(park, radiusMeters) {
 (
   relation(around:${radiusMeters},${park.lat},${park.lon})["boundary"~"protected_area|national_park"];
   relation(around:${radiusMeters},${park.lat},${park.lon})["leisure"="nature_reserve"];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["leisure"="park"];
   way(around:${radiusMeters},${park.lat},${park.lon})["boundary"~"protected_area|national_park"];
   way(around:${radiusMeters},${park.lat},${park.lon})["leisure"="nature_reserve"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["leisure"="park"];
 );
 out body;
 >;
@@ -590,8 +619,53 @@ out skel qt;
 `.trim();
 }
 
-function extractPolygonFeatures(geo) {
-  return (geo.features || []).filter(
+function isRiverPark(park) {
+  return /wild and scenic river/i.test(String(park?.name || ""));
+}
+
+function escapeOverpassRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function riverCoreName(parkName) {
+  return String(parkName || "")
+    .replace(/\bnational wild and scenic river\b/i, "")
+    .replace(/\bwild and scenic river\b/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildRiverOverpassQuery(park, radiusMeters) {
+  const full = escapeOverpassRegex(park.name);
+  const core = escapeOverpassRegex(riverCoreName(park.name));
+  const pattern = core ? `(${full}|${core})` : full;
+  return `
+[out:json][timeout:60];
+(
+  relation(around:${radiusMeters},${park.lat},${park.lon})["type"="waterway"]["name"~"${pattern}",i];
+  relation(around:${radiusMeters},${park.lat},${park.lon})["waterway"="river"]["name"~"${pattern}",i];
+  way(around:${radiusMeters},${park.lat},${park.lon})["waterway"="river"]["name"~"${pattern}",i];
+  way(around:${radiusMeters},${park.lat},${park.lon})["waterway"]["name"~"${pattern}",i];
+);
+out body;
+>;
+out skel qt;
+`.trim();
+}
+
+function extractFeaturesByMode(geo, mode) {
+  const all = geo.features || [];
+  if (mode === "river") {
+    return all.filter(
+      (f) => f.geometry && (
+        f.geometry.type === "LineString"
+        || f.geometry.type === "MultiLineString"
+        || f.geometry.type === "Polygon"
+        || f.geometry.type === "MultiPolygon"
+      ),
+    );
+  }
+  return all.filter(
     (f) => f.geometry && (f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon"),
   );
 }
@@ -615,7 +689,12 @@ async function overpassRequest(query) {
       if (!response.ok) {
         throw new Error(`${endpoint} returned ${response.status}`);
       }
-      return await response.json();
+      const payload = await response.json();
+      const remark = String(payload?.remark || "");
+      if (remark && /runtime error|timed out|too busy|Dispatcher_Client/i.test(remark)) {
+        throw new Error(`Overpass remark from ${endpoint}: ${remark}`);
+      }
+      return payload;
     } catch (err) {
       lastError = err;
     }
@@ -625,23 +704,87 @@ async function overpassRequest(query) {
 }
 
 async function fetchBoundaryGeoJson(park) {
+  if (isRiverPark(park)) {
+    const first = await overpassRequest(buildRiverOverpassQuery(park, 220000));
+    let geo = osmtogeojson(first);
+    let features = extractFeaturesByMode(geo, "river")
+      .map((f) => {
+        const candidateName = f.properties?.name || "";
+        const similarity = nameSimilarityScore(park.name, candidateName);
+        return { feature: f, similarity, candidateName };
+      })
+      .filter((x) => x.similarity >= 0.5)
+      .sort((a, b) => b.similarity - a.similarity)
+      .map((x) => ({
+        ...x.feature,
+        properties: {
+          ...(x.feature.properties || {}),
+          _potaMatchNote: `${park.reference} ${park.name}... found match ${x.candidateName}`,
+          _potaSimilarity: x.similarity,
+        },
+      }));
+
+    if (!features.length) {
+      const fallback = await overpassRequest(buildRiverOverpassQuery(park, 420000));
+      geo = osmtogeojson(fallback);
+      features = extractFeaturesByMode(geo, "river")
+        .map((f) => {
+          const candidateName = f.properties?.name || "";
+          const similarity = nameSimilarityScore(park.name, candidateName);
+          return { feature: f, similarity, candidateName };
+        })
+        .filter((x) => x.similarity >= 0.5)
+        .sort((a, b) => b.similarity - a.similarity)
+        .map((x) => ({
+          ...x.feature,
+          properties: {
+            ...(x.feature.properties || {}),
+            _potaMatchNote: `${park.reference} ${park.name}... found match ${x.candidateName}`,
+            _potaSimilarity: x.similarity,
+          },
+        }));
+    }
+
+    if (!features.length) {
+      return null;
+    }
+
+    const ranked = Array.from(features)
+      .map((f) => {
+        const center = featureCenter(f);
+        const distance = center
+          ? distanceKm(park.lat, park.lon, center[0], center[1])
+          : Number.POSITIVE_INFINITY;
+        const similarity = Number(f.properties?._potaSimilarity || 0);
+        const similarityBonus = similarity > 0 ? -100 * similarity : 0;
+        const lineBonus = (f.geometry?.type === "LineString" || f.geometry?.type === "MultiLineString") ? -20 : 0;
+        return { feature: f, score: distance + similarityBonus + lineBonus };
+      })
+      .sort((a, b) => a.score - b.score);
+
+    return {
+      type: "FeatureCollection",
+      features: ranked.slice(0, 20).map((x) => x.feature),
+    };
+  }
+
   const radius = park.name.includes("National Forest") ? 350000 : 120000;
   const first = await overpassRequest(buildOverpassQuery(park, radius));
 
   let geo = osmtogeojson(first);
-  let features = extractPolygonFeatures(geo);
+  let features = extractFeaturesByMode(geo, "protected");
 
   if (!features.length) {
     const fallback = await overpassRequest(buildOverpassQuery(park, 450000));
     geo = osmtogeojson(fallback);
-    features = extractPolygonFeatures(geo);
+    features = extractFeaturesByMode(geo, "protected");
   }
 
   // If exact name matching fails, look for nearby protected boundaries with similar names.
   if (!features.length) {
     const broad = await overpassRequest(buildOverpassBroadQuery(park, 180000));
     geo = osmtogeojson(broad);
-    const candidates = extractPolygonFeatures(geo)
+    const candidates = extractFeaturesByMode(geo, "protected")
       .map((f) => {
         const candidateName = f.properties?.name || "";
         const similarity = nameSimilarityScore(park.name, candidateName);
@@ -771,11 +914,22 @@ async function loadBoundary() {
     }
 
     boundaryLayer = L.geoJSON(geojson, {
-      style: {
-        color: "#0e6f50",
-        weight: 2,
-        fillColor: "#1fa477",
-        fillOpacity: 0.22,
+      style: (feature) => {
+        const gtype = feature?.geometry?.type || "";
+        const isLine = gtype === "LineString" || gtype === "MultiLineString";
+        if (isLine) {
+          return {
+            color: "#0e6f50",
+            weight: 4,
+            opacity: 0.9,
+          };
+        }
+        return {
+          color: "#0e6f50",
+          weight: 2,
+          fillColor: "#1fa477",
+          fillOpacity: 0.22,
+        };
       },
       onEachFeature: (feature, layer) => {
         const name = feature.properties?.name || currentPark.name;

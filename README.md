@@ -51,6 +51,12 @@ Build for specific states:
 python ./scripts/build_boundary_bundle.py --states UT CO AZ
 ```
 
+Reprocess specific references (if matching logic changed):
+
+```bash
+python ./scripts/build_boundary_bundle.py --states UT --force-refs US-0557 US-0895
+```
+
 Build for all parks:
 
 ```bash
@@ -59,6 +65,7 @@ python ./scripts/build_boundary_bundle.py --all
 
 The script writes directly to `data/us-boundaries.json` (resume-friendly if rerun).
 Boundary issues are logged to `data/us-boundary-issues.jsonl` by default (no-boundary, failed, and similar-name fallback notes).
+`Wild and Scenic River` parks use a river-corridor lookup path (line/polygon geometry), not only protected-area polygons.
 
 ### Option B: In-browser export/import
 

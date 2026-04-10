@@ -21,7 +21,11 @@ const prefetchStatusEl = document.getElementById("prefetchStatus");
   }
 })();
 
-const map = L.map("map").setView([39.5, -98.35], 4);
+const map = L.map("map", {
+  zoomAnimation: false,
+  fadeAnimation: false,
+  markerZoomAnimation: false,
+}).setView([39.5, -98.35], 4);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 18,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
@@ -34,6 +38,10 @@ window.addEventListener("resize", () => {
 window.setTimeout(() => {
   map.invalidateSize();
 }, 0);
+window.setTimeout(() => {
+  map.invalidateSize(true);
+  map.setView([39.5, -98.35], map.getZoom(), { animate: false });
+}, 150);
 
 let parks = [];
 let currentPark = null;

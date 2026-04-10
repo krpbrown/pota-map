@@ -174,6 +174,29 @@ button:disabled {
   border-radius: 12px;
 }
 
+/* Leaflet stability overrides: prevent external/global img rules from breaking tile layout. */
+#map.leaflet-container {
+  position: relative;
+  overflow: hidden;
+}
+
+#map .leaflet-pane,
+#map .leaflet-tile,
+#map .leaflet-marker-icon,
+#map .leaflet-marker-shadow,
+#map .leaflet-tile-container,
+#map .leaflet-pane > svg,
+#map .leaflet-pane > canvas {
+  position: absolute;
+}
+
+#map .leaflet-tile,
+#map .leaflet-marker-icon,
+#map .leaflet-marker-shadow {
+  max-width: none !important;
+  max-height: none !important;
+}
+
 @media (max-width: 900px) {
   .layout {
     grid-template-columns: 1fr;

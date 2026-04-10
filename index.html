@@ -24,6 +24,15 @@
         <button id="clearBoundaryBtn" disabled>Clear Boundary</button>
       </div>
 
+      <div class="prefetch">
+        <label for="stateCodeInput">State Boundary Cache</label>
+        <div class="actions">
+          <input id="stateCodeInput" type="text" maxlength="2" placeholder="Example: CO">
+          <button id="prefetchStateBtn" disabled>Warm State Cache</button>
+        </div>
+        <div id="prefetchStatus" class="status muted"></div>
+      </div>
+
       <div id="status" class="status">Loading park index...</div>
       <div id="details" class="details"></div>
     </section>

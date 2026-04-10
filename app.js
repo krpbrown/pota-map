@@ -4,6 +4,22 @@ const searchEl = document.getElementById("parkSearch");
 const resultsEl = document.getElementById("results");
 const loadBoundaryBtn = document.getElementById("loadBoundaryBtn");
 const clearBoundaryBtn = document.getElementById("clearBoundaryBtn");
+const stateCodeInputEl = document.getElementById("stateCodeInput");
+const prefetchStateBtn = document.getElementById("prefetchStateBtn");
+const prefetchStatusEl = document.getElementById("prefetchStatus");
+
+// If the user pressed browser reload, force a cache-busted navigation once.
+(() => {
+  const navEntry = performance.getEntriesByType?.("navigation")?.[0];
+  if (navEntry?.type !== "reload") {
+    return;
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("_hr", Date.now().toString());
+  if (url.toString() !== window.location.href) {
+    window.location.replace(url.toString());
+  }
+})();
 
 const map = L.map("map").setView([39.5, -98.35], 4);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -15,9 +31,16 @@ let parks = [];
 let currentPark = null;
 let pointMarker = null;
 let boundaryLayer = null;
+const boundaryCache = new Map();
+const noBoundaryCache = new Set();
+let isPrefetching = false;
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function setPrefetchStatus(message) {
+  prefetchStatusEl.textContent = message;
 }
 
 function escapeHtml(value) {
@@ -32,6 +55,7 @@ function escapeHtml(value) {
 function updateButtons() {
   loadBoundaryBtn.disabled = !currentPark;
   clearBoundaryBtn.disabled = !boundaryLayer;
+  prefetchStateBtn.disabled = isPrefetching || !parks.length;
 }
 
 function clearBoundary() {
@@ -244,6 +268,46 @@ async function fetchBoundaryGeoJson(park) {
   };
 }
 
+function locationStates(park) {
+  return String(park.location || "")
+    .split(",")
+    .map((part) => part.trim().toUpperCase())
+    .filter((part) => part.startsWith("US-"));
+}
+
+function normalizeStateCode(raw) {
+  const value = String(raw || "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(value)) {
+    return null;
+  }
+  return value;
+}
+
+function parkHasState(park, stateCode) {
+  return locationStates(park).includes(`US-${stateCode}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function getBoundaryWithCache(park) {
+  if (boundaryCache.has(park.reference)) {
+    return { geojson: boundaryCache.get(park.reference), source: "cache" };
+  }
+  if (noBoundaryCache.has(park.reference)) {
+    return { geojson: null, source: "cache-none" };
+  }
+
+  const geojson = await fetchBoundaryGeoJson(park);
+  if (geojson && geojson.features?.length) {
+    boundaryCache.set(park.reference, geojson);
+  } else {
+    noBoundaryCache.add(park.reference);
+  }
+  return { geojson, source: "network" };
+}
+
 async function loadBoundary() {
   if (!currentPark) {
     return;
@@ -253,7 +317,7 @@ async function loadBoundary() {
   loadBoundaryBtn.disabled = true;
 
   try {
-    const geojson = await fetchBoundaryGeoJson(currentPark);
+    const { geojson, source } = await getBoundaryWithCache(currentPark);
     clearBoundary();
 
     if (!geojson || !geojson.features?.length) {
@@ -277,7 +341,8 @@ async function loadBoundary() {
     }).addTo(map);
 
     map.fitBounds(boundaryLayer.getBounds(), { padding: [20, 20] });
-    setStatus(`Loaded ${geojson.features.length} boundary feature(s).`);
+    const sourceLabel = source === "cache" ? "cache" : "network";
+    setStatus(`Loaded ${geojson.features.length} boundary feature(s) (${sourceLabel}).`);
   } catch (error) {
     console.error(error);
     setStatus("Boundary lookup failed. Try again in a moment or choose another park.");
@@ -287,15 +352,77 @@ async function loadBoundary() {
   }
 }
 
+async function prefetchStateBoundaries() {
+  const stateCode = normalizeStateCode(stateCodeInputEl.value);
+  if (!stateCode) {
+    setPrefetchStatus("Enter a 2-letter state code (for example: CO).");
+    return;
+  }
+
+  const parksInState = parks.filter((park) => parkHasState(park, stateCode));
+  if (!parksInState.length) {
+    setPrefetchStatus(`No parks found for US-${stateCode}.`);
+    return;
+  }
+
+  isPrefetching = true;
+  updateButtons();
+
+  let cachedCount = 0;
+  let fetchedCount = 0;
+  let missingCount = 0;
+  let failedCount = 0;
+
+  try {
+    setPrefetchStatus(`Warming cache for US-${stateCode}: 0/${parksInState.length}`);
+
+    for (let i = 0; i < parksInState.length; i += 1) {
+      const park = parksInState[i];
+      let requestSource = null;
+      try {
+        const { geojson, source } = await getBoundaryWithCache(park);
+        requestSource = source;
+        if (source === "cache" || source === "cache-none") {
+          cachedCount += 1;
+        } else if (geojson?.features?.length) {
+          fetchedCount += 1;
+        } else {
+          missingCount += 1;
+        }
+      } catch (err) {
+        console.error(err);
+        failedCount += 1;
+      }
+
+      setPrefetchStatus(
+        `US-${stateCode}: ${i + 1}/${parksInState.length} ` +
+        `(from cache ${cachedCount}, fetched ${fetchedCount}, no-boundary ${missingCount}, failed ${failedCount})`,
+      );
+
+      // Respect Overpass capacity when we are making new requests in bulk.
+      if (requestSource === "network") {
+        await sleep(250);
+      }
+    }
+  } finally {
+    isPrefetching = false;
+    updateButtons();
+  }
+}
+
 async function loadParkIndex() {
   try {
-    const response = await fetch("data/us-parks.json");
+    const parkIndexUrl = new URL("data/us-parks.json", window.location.href);
+    parkIndexUrl.searchParams.set("_ts", Date.now().toString());
+    const response = await fetch(parkIndexUrl.toString(), { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Park index HTTP ${response.status}`);
     }
     parks = await response.json();
     parks.sort((a, b) => (a.reference < b.reference ? -1 : 1));
     setStatus(`Loaded ${parks.length.toLocaleString()} U.S. active POTA parks.`);
+    setPrefetchStatus("Tip: enter a state code and warm the boundary cache.");
+    updateButtons();
 
     const initialRef = (location.hash || "").replace("#", "").toUpperCase();
     if (initialRef) {
@@ -328,6 +455,15 @@ loadBoundaryBtn.addEventListener("click", loadBoundary);
 clearBoundaryBtn.addEventListener("click", () => {
   clearBoundary();
   setStatus("Boundary cleared.");
+});
+prefetchStateBtn.addEventListener("click", prefetchStateBoundaries);
+stateCodeInputEl.addEventListener("input", () => {
+  stateCodeInputEl.value = stateCodeInputEl.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
+});
+stateCodeInputEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    prefetchStateBoundaries();
+  }
 });
 
 loadParkIndex();

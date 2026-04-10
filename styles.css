@@ -61,6 +61,30 @@ body {
   font-size: 0.95rem;
 }
 
+.prefetch {
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
+  border-top: 1px dashed var(--border);
+}
+
+.prefetch .actions {
+  align-items: center;
+}
+
+#stateCodeInput {
+  width: 120px;
+  margin-top: 0;
+  text-transform: uppercase;
+}
+
+#prefetchStateBtn {
+  background: #295f9e;
+}
+
+.status.muted {
+  color: var(--muted);
+}
+
 .results {
   margin-top: 0.6rem;
   max-height: 260px;

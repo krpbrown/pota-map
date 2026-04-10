@@ -180,21 +180,26 @@ def name_similarity_score(a: str, b: str) -> float:
 
 def build_exact_query(park: Park, radius: int) -> str:
     variants = [park.name]
+    is_state_park_name = bool(re.search(r"state park", park.name, flags=re.IGNORECASE))
     if re.search(r"state park", park.name, flags=re.IGNORECASE) and not re.search(
         r"museum", park.name, flags=re.IGNORECASE
     ):
         variants.append(f"{park.name} and Museum")
     pattern = "|".join(escape_overpass_regex(v) for v in variants)
+    park_tag_lines = ""
+    if is_state_park_name:
+        park_tag_lines = f"""
+  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];
+  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];"""
     return f"""
 [out:json][timeout:60];
 (
   relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
   relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
   relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["type"="boundary"];
-  relation(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];
   way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["boundary"~"protected_area|national_park"];
   way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="nature_reserve"];
-  way(around:{radius},{park.lat},{park.lon})["name"~"^({pattern})$",i]["leisure"="park"];
+  {park_tag_lines}
 );
 out body;
 >;
@@ -203,15 +208,20 @@ out skel qt;
 
 
 def build_broad_query(park: Park, radius: int) -> str:
+    is_state_park_name = bool(re.search(r"state park", park.name, flags=re.IGNORECASE))
+    park_tag_lines = ""
+    if is_state_park_name:
+        park_tag_lines = f"""
+  relation(around:{radius},{park.lat},{park.lon})["leisure"="park"];
+  way(around:{radius},{park.lat},{park.lon})["leisure"="park"];"""
     return f"""
 [out:json][timeout:60];
 (
   relation(around:{radius},{park.lat},{park.lon})["boundary"~"protected_area|national_park"];
   relation(around:{radius},{park.lat},{park.lon})["leisure"="nature_reserve"];
-  relation(around:{radius},{park.lat},{park.lon})["leisure"="park"];
   way(around:{radius},{park.lat},{park.lon})["boundary"~"protected_area|national_park"];
   way(around:{radius},{park.lat},{park.lon})["leisure"="nature_reserve"];
-  way(around:{radius},{park.lat},{park.lon})["leisure"="park"];
+  {park_tag_lines}
 );
 out body;
 >;

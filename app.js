@@ -590,20 +590,25 @@ function nameSimilarityScore(a, b) {
 
 function buildOverpassQuery(park, radiusMeters) {
   const variants = [park.name];
+  const isStateParkName = /state park/i.test(park.name);
   if (/state park/i.test(park.name) && !/museum/i.test(park.name)) {
     variants.push(`${park.name} and Museum`);
   }
   const pattern = variants.map((v) => escapeOverpassRegex(v)).join("|");
+  const parkTagLines = isStateParkName
+    ? `
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];`
+    : "";
   return `
 [out:json][timeout:45];
 (
   relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
   relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
   relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["type"="boundary"];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];
   way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
   way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];
+  ${parkTagLines}
 );
 out body;
 >;
@@ -612,15 +617,20 @@ out skel qt;
 }
 
 function buildOverpassBroadQuery(park, radiusMeters) {
+  const isStateParkName = /state park/i.test(park.name);
+  const parkTagLines = isStateParkName
+    ? `
+  relation(around:${radiusMeters},${park.lat},${park.lon})["leisure"="park"];
+  way(around:${radiusMeters},${park.lat},${park.lon})["leisure"="park"];`
+    : "";
   return `
 [out:json][timeout:60];
 (
   relation(around:${radiusMeters},${park.lat},${park.lon})["boundary"~"protected_area|national_park"];
   relation(around:${radiusMeters},${park.lat},${park.lon})["leisure"="nature_reserve"];
-  relation(around:${radiusMeters},${park.lat},${park.lon})["leisure"="park"];
   way(around:${radiusMeters},${park.lat},${park.lon})["boundary"~"protected_area|national_park"];
   way(around:${radiusMeters},${park.lat},${park.lon})["leisure"="nature_reserve"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["leisure"="park"];
+  ${parkTagLines}
 );
 out body;
 >;

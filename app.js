@@ -655,26 +655,36 @@ function nameSimilarityScore(a, b) {
   return intersection / Math.min(ta.size, tb.size);
 }
 
-function buildOverpassQuery(park, radiusMeters) {
+function buildOverpassQuery(park, radiusMeters, options = {}) {
+  const includeRelations = options.includeRelations !== false;
+  const includeWays = options.includeWays !== false;
   const variants = [park.name];
   const isStateParkName = /state park/i.test(park.name);
   if (/state park/i.test(park.name) && !/museum/i.test(park.name)) {
     variants.push(`${park.name} and Museum`);
   }
   const pattern = variants.map((v) => escapeOverpassRegex(v)).join("|");
-  const parkTagLines = isStateParkName
-    ? `
+  const relationLines = includeRelations ? `
   relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];
-  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];`
-    : "";
-  return `
-[out:json][timeout:45];
-(
+` : "";
+  const wayLines = includeWays ? `
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="park"];
+` : "";
+  const parkTagLines = isStateParkName ? `${relationLines}${wayLines}` : "";
+  const relationQueryLines = includeRelations ? `
   relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
   relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
   relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["type"="boundary"];
+` : "";
+  const wayQueryLines = includeWays ? `
   way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["boundary"~"protected_area|national_park"];
   way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i]["leisure"="nature_reserve"];
+` : "";
+  return `
+[out:json][timeout:25];
+(
+  ${relationQueryLines}
+  ${wayQueryLines}
   ${parkTagLines}
 );
 out body;
@@ -691,7 +701,7 @@ function buildOverpassBroadQuery(park, radiusMeters) {
   way(around:${radiusMeters},${park.lat},${park.lon})["leisure"="park"];`
     : "";
   return `
-[out:json][timeout:60];
+[out:json][timeout:25];
 (
   relation(around:${radiusMeters},${park.lat},${park.lon})["boundary"~"protected_area|national_park"];
   relation(around:${radiusMeters},${park.lat},${park.lon})["leisure"="nature_reserve"];
@@ -703,6 +713,21 @@ out body;
 >;
 out skel qt;
 `.trim();
+}
+
+function getSearchRadii(park, mode) {
+  const fastMode = mode === "fast";
+  const name = String(park.name || "");
+  if (/National Forest/i.test(name)) {
+    return fastMode ? [140000, 220000] : [160000, 260000];
+  }
+  if (/state park/i.test(name)) {
+    return fastMode ? [20000, 45000] : [25000, 60000];
+  }
+  if (/national park|national monument|wildlife refuge|recreation area/i.test(name)) {
+    return fastMode ? [35000, 80000] : [45000, 110000];
+  }
+  return fastMode ? [30000, 70000] : [40000, 100000];
 }
 
 function isRiverPark(park) {
@@ -818,9 +843,13 @@ async function overpassRequest(query, options = {}) {
       }
       return payload;
     } catch (err) {
-      lastError = err;
+      if (err?.name === "AbortError") {
+        lastError = new Error(`Timed out after ${timeoutMs}ms at ${endpoint}`);
+      } else {
+        lastError = err;
+      }
       if (diag) {
-        diag("warn", `${endpoint}${diagTag} failed: ${shortenErrorMessage(err)}`);
+        diag("warn", `${endpoint}${diagTag} failed: ${shortenErrorMessage(lastError)}`);
       }
     }
   }
@@ -921,35 +950,46 @@ async function fetchBoundaryGeoJson(park) {
     };
   }
 
-  const radius = park.name.includes("National Forest") ? (fastMode ? 220000 : 350000) : (fastMode ? 80000 : 120000);
-  const first = await overpassRequest(
-    buildOverpassQuery(park, radius),
-    { ...requestOptions, diagTag: `exact radius=${radius}` },
-  );
+  const [primaryRadius, secondaryRadius] = getSearchRadii(park, mode);
+  const stagedQueries = [
+    { radius: primaryRadius, includeRelations: true, includeWays: false, tag: `exact relation radius=${primaryRadius}` },
+    { radius: primaryRadius, includeRelations: false, includeWays: true, tag: `exact way radius=${primaryRadius}` },
+    { radius: secondaryRadius, includeRelations: true, includeWays: false, tag: `exact relation radius=${secondaryRadius}` },
+    { radius: secondaryRadius, includeRelations: false, includeWays: true, tag: `exact way radius=${secondaryRadius}` },
+  ];
 
-  let geo = osmtogeojson(first);
-  let features = extractFeaturesByMode(geo, "protected");
-  if (diag) {
-    diag("info", `Exact query returned ${features.length} polygon candidate(s).`);
-  }
-
-  if (!features.length && !fastMode) {
-    const fallback = await overpassRequest(
-      buildOverpassQuery(park, 450000),
-      { ...requestOptions, diagTag: "exact fallback radius=450000" },
-    );
-    geo = osmtogeojson(fallback);
-    features = extractFeaturesByMode(geo, "protected");
-    if (diag) {
-      diag("info", `Fallback exact query returned ${features.length} polygon candidate(s).`);
+  let geo = null;
+  let features = [];
+  for (const stage of stagedQueries) {
+    try {
+      const payload = await overpassRequest(
+        buildOverpassQuery(park, stage.radius, {
+          includeRelations: stage.includeRelations,
+          includeWays: stage.includeWays,
+        }),
+        { ...requestOptions, diagTag: stage.tag },
+      );
+      geo = osmtogeojson(payload);
+      features = extractFeaturesByMode(geo, "protected");
+      if (diag) {
+        diag("info", `${stage.tag} returned ${features.length} polygon candidate(s).`);
+      }
+      if (features.length) {
+        break;
+      }
+    } catch (err) {
+      if (diag) {
+        diag("warn", `${stage.tag} stage failed: ${shortenErrorMessage(err)}`);
+      }
     }
   }
 
   // If exact name matching fails, look for nearby protected boundaries with similar names.
   if (!features.length && !fastMode) {
+    const broadRadius = Math.max(secondaryRadius, 120000);
     const broad = await overpassRequest(
-      buildOverpassBroadQuery(park, 180000),
-      { ...requestOptions, diagTag: "broad radius=180000" },
+      buildOverpassBroadQuery(park, broadRadius),
+      { ...requestOptions, diagTag: `broad radius=${broadRadius}` },
     );
     geo = osmtogeojson(broad);
     const candidates = extractFeaturesByMode(geo, "protected")

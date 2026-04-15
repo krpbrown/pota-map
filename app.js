@@ -754,6 +754,21 @@ out skel qt;
 `.trim();
 }
 
+function buildOverpassNameOnlyQuery(park, radiusMeters) {
+  const variants = parkNameVariants(park.name);
+  const pattern = variants.map((v) => escapeOverpassRegex(v)).join("|");
+  return `
+[out:json][timeout:25];
+(
+  relation(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i];
+  way(around:${radiusMeters},${park.lat},${park.lon})["name"~"^(${pattern})$",i];
+);
+out body;
+>;
+out skel qt;
+`.trim();
+}
+
 function getSearchRadii(park, mode) {
   const fastMode = mode === "fast";
   const name = String(park.name || "");
@@ -767,6 +782,23 @@ function getSearchRadii(park, mode) {
     return fastMode ? [35000, 80000] : [45000, 110000];
   }
   return fastMode ? [30000, 70000] : [40000, 100000];
+}
+
+function boundaryDistanceProfile(park) {
+  const name = String(park?.name || "");
+  if (/national forest/i.test(name)) {
+    return { floorKm: 120, capKm: 340 };
+  }
+  if (/historic trail|scenic trail|national trail|river/i.test(name)) {
+    return { floorKm: 120, capKm: 500 };
+  }
+  if (/state game land|wildlife|wma|management area/i.test(name)) {
+    return { floorKm: 35, capKm: 130 };
+  }
+  if (/state park/i.test(name)) {
+    return { floorKm: 35, capKm: 95 };
+  }
+  return { floorKm: 45, capKm: 150 };
 }
 
 function isRiverPark(park) {
@@ -842,6 +874,7 @@ async function overpassRequest(query, options = {}) {
   const timeoutMs = Number(options.timeoutMs || OVERPASS_TIMEOUT_MS_INTERACTIVE);
   const diag = typeof options.diag === "function" ? options.diag : null;
   const diagTag = options.diagTag ? ` (${options.diagTag})` : "";
+  const errorTracker = options.errorTracker || null;
   const endpoints = [
     "https://overpass-api.de/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
@@ -890,6 +923,9 @@ async function overpassRequest(query, options = {}) {
       if (diag) {
         diag("warn", `${endpoint}${diagTag} failed: ${shortenErrorMessage(lastError)}`);
       }
+      if (errorTracker) {
+        errorTracker.count = (errorTracker.count || 0) + 1;
+      }
     }
   }
 
@@ -900,9 +936,12 @@ async function fetchBoundaryGeoJson(park) {
   const mode = arguments.length > 1 && arguments[1] ? arguments[1] : "full";
   const fastMode = mode === "fast";
   const diag = arguments.length > 2 && typeof arguments[2] === "function" ? arguments[2] : null;
+  const lookupMeta = arguments.length > 3 && arguments[3] ? arguments[3] : null;
+  const errorTracker = { count: 0 };
   const requestOptions = {
     timeoutMs: fastMode ? OVERPASS_TIMEOUT_MS_PREFETCH : OVERPASS_TIMEOUT_MS_INTERACTIVE,
     diag,
+    errorTracker,
   };
   if (diag) {
     diag("info", `fetchBoundaryGeoJson mode=${mode} name="${park.name}"`);
@@ -1025,6 +1064,45 @@ async function fetchBoundaryGeoJson(park) {
 
   // If exact name matching fails, look for nearby protected boundaries with similar names.
   if (!features.length && !fastMode) {
+    const nameOnlyRadius = Math.max(secondaryRadius, 100000);
+    try {
+      const nameOnlyPayload = await overpassRequest(
+        buildOverpassNameOnlyQuery(park, nameOnlyRadius),
+        { ...requestOptions, diagTag: `name-only radius=${nameOnlyRadius}` },
+      );
+      const nameOnlyGeo = osmtogeojson(nameOnlyPayload);
+      const nameOnlyCandidates = extractFeaturesByMode(nameOnlyGeo, "protected")
+        .map((f) => {
+          const candidateName = f.properties?.name || "";
+          const similarity = nameSimilarityScore(park.name, candidateName);
+          return { feature: f, similarity, candidateName };
+        })
+        .filter((x) => x.similarity >= 0.65)
+        .sort((a, b) => b.similarity - a.similarity);
+      if (nameOnlyCandidates.length) {
+        features = nameOnlyCandidates.slice(0, 20).map((x) => ({
+          ...x.feature,
+          properties: {
+            ...(x.feature.properties || {}),
+            _potaMatchNote: `${park.reference} ${park.name}... name-only match ${x.candidateName}`,
+            _potaSimilarity: x.similarity,
+          },
+        }));
+        if (diag) {
+          diag("info", `Name-only fallback accepted ${features.length} candidate(s).`);
+        }
+      } else if (diag) {
+        diag("info", "Name-only fallback returned 0 candidates.");
+      }
+    } catch (err) {
+      if (diag) {
+        diag("warn", `Name-only stage failed: ${shortenErrorMessage(err)}`);
+      }
+    }
+  }
+
+  // If exact name matching fails, look for nearby protected boundaries with similar names.
+  if (!features.length && !fastMode) {
     const broadRadius = Math.max(secondaryRadius, 120000);
     const broad = await overpassRequest(
       buildOverpassBroadQuery(park, broadRadius),
@@ -1062,6 +1140,9 @@ async function fetchBoundaryGeoJson(park) {
     if (diag) {
       diag("warn", "No polygon features after all query stages.");
     }
+    if (lookupMeta) {
+      lookupMeta.hadNetworkErrors = (errorTracker.count || 0) > 0;
+    }
     return null;
   }
 
@@ -1084,13 +1165,45 @@ async function fetchBoundaryGeoJson(park) {
       const relationBonus = String(f.id || "").startsWith("relation/") ? -25 : 0;
       const similarity = Number(f.properties?._potaSimilarity || 0);
       const similarityBonus = similarity > 0 ? -100 * similarity : 0;
-      return { feature: f, score: distance + tagBonus + relationBonus + similarityBonus };
+      return {
+        feature: f,
+        distance,
+        similarity,
+        score: distance + tagBonus + relationBonus + similarityBonus,
+      };
     })
     .sort((a, b) => a.score - b.score);
 
+  const finiteDistances = scored.filter((x) => Number.isFinite(x.distance));
+  let pruned = scored;
+  if (finiteDistances.length > 1) {
+    const best = finiteDistances[0].distance;
+    const profile = boundaryDistanceProfile(park);
+    const adaptiveLimit = Math.max(profile.floorKm, Math.min(profile.capKm, best * 4));
+    const next = scored.filter((x) => {
+      if (!Number.isFinite(x.distance)) {
+        return false;
+      }
+      if (x.distance <= adaptiveLimit) {
+        return true;
+      }
+      return x.similarity >= 0.9;
+    });
+    if (next.length) {
+      pruned = next;
+    }
+    if (diag) {
+      diag(
+        "info",
+        `Distance prune kept ${pruned.length}/${scored.length} candidate(s) ` +
+        `(best=${best.toFixed(1)}km limit=${adaptiveLimit.toFixed(1)}km).`,
+      );
+    }
+  }
+
   return {
     type: "FeatureCollection",
-    features: scored.slice(0, 12).map((x) => x.feature),
+    features: pruned.slice(0, 12).map((x) => x.feature),
   };
 }
 
@@ -1122,6 +1235,8 @@ async function getBoundaryWithCache(park) {
   const mode = options.mode || "full";
   const cacheMissResult = options.cacheMissResult !== false;
   const diag = typeof options.diag === "function" ? options.diag : null;
+  const revalidateNoBoundary = options.revalidateNoBoundary === true;
+  const cacheNoBoundaryOnError = options.cacheNoBoundaryOnError !== false;
 
   if (boundaryCache.has(park.reference)) {
     if (diag) {
@@ -1130,10 +1245,16 @@ async function getBoundaryWithCache(park) {
     return { geojson: boundaryCache.get(park.reference), source: "cache" };
   }
   if (noBoundaryCache.has(park.reference)) {
-    if (diag) {
-      diag("info", `Memory no-boundary cache hit for ${park.reference}.`);
+    if (!revalidateNoBoundary) {
+      if (diag) {
+        diag("info", `Memory no-boundary cache hit for ${park.reference}.`);
+      }
+      return { geojson: null, source: "cache-none" };
     }
-    return { geojson: null, source: "cache-none" };
+    if (diag) {
+      diag("info", `Memory no-boundary cache hit for ${park.reference}; revalidating via network.`);
+    }
+    noBoundaryCache.delete(park.reference);
   }
 
   if (!sessionIgnorePersistedCache) {
@@ -1150,11 +1271,16 @@ async function getBoundaryWithCache(park) {
         return { geojson: persisted.geojson, source: "cache" };
       }
       if (persisted.noBoundaryVersion === NO_BOUNDARY_CACHE_VERSION) {
-        noBoundaryCache.add(park.reference);
-        if (diag) {
-          diag("info", "IndexedDB no-boundary cache hit.");
+        if (!revalidateNoBoundary) {
+          noBoundaryCache.add(park.reference);
+          if (diag) {
+            diag("info", "IndexedDB no-boundary cache hit.");
+          }
+          return { geojson: null, source: "cache-none" };
         }
-        return { geojson: null, source: "cache-none" };
+        if (diag) {
+          diag("info", "IndexedDB no-boundary cache hit; revalidating via network.");
+        }
       }
     }
     if (diag) {
@@ -1162,18 +1288,23 @@ async function getBoundaryWithCache(park) {
     }
   }
 
-  const geojson = await fetchBoundaryGeoJson(park, mode, diag);
+  const lookupMeta = { hadNetworkErrors: false };
+  const geojson = await fetchBoundaryGeoJson(park, mode, diag, lookupMeta);
   if (geojson && geojson.features?.length) {
     boundaryCache.set(park.reference, geojson);
     await dbWriteBoundary(park.reference, geojson);
     if (diag) {
       diag("info", `Network lookup success; cached ${geojson.features.length} feature(s).`);
     }
-  } else if (cacheMissResult) {
+  } else if (cacheMissResult && (!lookupMeta.hadNetworkErrors || cacheNoBoundaryOnError)) {
     noBoundaryCache.add(park.reference);
     await dbWriteBoundary(park.reference, null);
     if (diag) {
       diag("info", "Network lookup returned no boundary; stored no-boundary cache entry.");
+    }
+  } else if (cacheMissResult && lookupMeta.hadNetworkErrors && !cacheNoBoundaryOnError) {
+    if (diag) {
+      diag("warn", "Network lookup returned no boundary with endpoint errors; skipping no-boundary cache write.");
     }
   } else if (diag) {
     diag("info", "Network lookup returned no boundary; no-boundary result not persisted (fast mode).");
@@ -1195,6 +1326,8 @@ async function loadBoundary() {
     const { geojson, source } = await getBoundaryWithCache(currentPark, {
       mode: "full",
       cacheMissResult: true,
+      cacheNoBoundaryOnError: false,
+      revalidateNoBoundary: true,
       diag: appendBoundaryDiag,
     });
     clearBoundary();

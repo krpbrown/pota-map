@@ -596,6 +596,12 @@ function normalizeForNameMatch(value) {
   return String(value || "")
     .toLowerCase()
     .replaceAll("&", " and ")
+    .replace(/\bblm\b/g, " ")
+    .replace(/\bspecial recreation management area\b/g, " ")
+    .replace(/\brecreation management area\b/g, " ")
+    .replace(/\bmanagement area\b/g, " ")
+    .replace(/\bconservation area\b/g, " ")
+    .replace(/\bnational conservation area\b/g, " ")
     .replace(/\bnational wildlife refuge\b/g, " ")
     .replace(/\bnational wild and scenic river\b/g, " river ")
     .replace(/\bwild and scenic river\b/g, " river ")
@@ -609,6 +615,39 @@ function normalizeForNameMatch(value) {
     .replace(/[^a-z0-9 ]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function parkNameVariants(parkName) {
+  const raw = String(parkName || "").trim();
+  if (!raw) {
+    return [];
+  }
+  const lowered = raw.toLowerCase();
+  const variants = [raw];
+
+  const stripped = raw
+    .replace(/\bBLM\b/gi, " ")
+    .replace(/\bSpecial Recreation Management Area\b/gi, " ")
+    .replace(/\bRecreation Management Area\b/gi, " ")
+    .replace(/\bNational Conservation Area\b/gi, " ")
+    .replace(/\bConservation Area\b/gi, " ")
+    .replace(/\bManagement Area\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (stripped && stripped.toLowerCase() !== lowered) {
+    variants.push(stripped);
+  }
+
+  const core = normalizeForNameMatch(raw)
+    .split(" ")
+    .filter(Boolean)
+    .join(" ");
+  if (core && core !== normalizeForNameMatch(raw)) {
+    variants.push(core.replace(/\b\w/g, (c) => c.toUpperCase()));
+  }
+
+  return Array.from(new Set(variants));
 }
 
 const WATERBODY_TOKENS = new Set([
@@ -658,7 +697,7 @@ function nameSimilarityScore(a, b) {
 function buildOverpassQuery(park, radiusMeters, options = {}) {
   const includeRelations = options.includeRelations !== false;
   const includeWays = options.includeWays !== false;
-  const variants = [park.name];
+  const variants = parkNameVariants(park.name);
   const isStateParkName = /state park/i.test(park.name);
   if (/state park/i.test(park.name) && !/museum/i.test(park.name)) {
     variants.push(`${park.name} and Museum`);

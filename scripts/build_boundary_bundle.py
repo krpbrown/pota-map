@@ -67,9 +67,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default="data/us-boundaries.json")
     parser.add_argument("--states", nargs="*", default=[])
     parser.add_argument("--all", action="store_true", help="Process all parks in parks file")
-    parser.add_argument("--delay-ms", type=int, default=250)
-    parser.add_argument("--retries", type=int, default=2)
-    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--delay-ms", type=int, default=80)
+    parser.add_argument("--retries", type=int, default=1)
+    parser.add_argument("--timeout", type=int, default=35)
+    parser.add_argument(
+        "--mode",
+        choices=["fast", "full"],
+        default="fast",
+        help="fast: fewer/smaller queries for bulk caching; full: highest coverage but much slower",
+    )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=10,
+        help="Write output checkpoint every N processed parks (0 disables periodic saves)",
+    )
     parser.add_argument("--max", type=int, default=0, help="Limit number of parks (0 = no limit)")
     parser.add_argument(
         "--force-refs",
@@ -132,6 +144,16 @@ def normalize_for_name_match(value: str) -> str:
 
 def is_river_park(park: Park) -> bool:
     return bool(re.search(r"wild and scenic river", park.name, flags=re.IGNORECASE))
+
+
+def is_likely_nonpolygon_park(park: Park) -> bool:
+    return bool(
+        re.search(
+            r"\b(historic trail|scenic trail|state trail|national trail|parkway)\b",
+            park.name,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def river_core_name(park_name: str) -> str:
@@ -419,8 +441,14 @@ def annotate_and_rank_features(park: Park, features: list[dict[str, Any]]) -> li
     return [x[1] for x in scored[:12]]
 
 
-def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, Any] | None:
+def fetch_boundary_geojson(park: Park, retries: int, timeout: int, mode: str) -> dict[str, Any] | None:
+    fast_mode = mode == "fast"
+    if fast_mode and is_likely_nonpolygon_park(park):
+        return None
+
     if is_river_park(park):
+        if fast_mode:
+            return None
         first = overpass_request(build_river_query(park, 160000), retries=retries, timeout=timeout)
         geo = to_geojson(first)
         features: list[dict[str, Any]] = []
@@ -458,14 +486,23 @@ def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, 
         return {"type": "FeatureCollection", "features": final_features}
 
     is_forest = "National Forest" in park.name
-    initial_radius = 220000 if is_forest else 70000
-    secondary_radius = 420000 if is_forest else 150000
-    staged_queries = [
-        (initial_radius, True, False),
-        (initial_radius, False, True),
-        (secondary_radius, True, False),
-        (secondary_radius, False, True),
-    ]
+    if fast_mode:
+        initial_radius = 180000 if is_forest else 60000
+        secondary_radius = 280000 if is_forest else 110000
+        staged_queries = [
+            (initial_radius, True, False),
+            (initial_radius, False, True),
+            (secondary_radius, True, False),
+        ]
+    else:
+        initial_radius = 220000 if is_forest else 70000
+        secondary_radius = 420000 if is_forest else 150000
+        staged_queries = [
+            (initial_radius, True, False),
+            (initial_radius, False, True),
+            (secondary_radius, True, False),
+            (secondary_radius, False, True),
+        ]
     features: list[dict[str, Any]] = []
     last_stage_error: Exception | None = None
     for radius, use_rel, use_way in staged_queries:
@@ -482,7 +519,7 @@ def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, 
         except Exception as exc:  # noqa: BLE001
             last_stage_error = exc
 
-    if not features:
+    if (not features) and (not fast_mode):
         for broad_radius in ([120000, 220000] if not is_forest else [280000, 420000]):
             try:
                 broad = overpass_request(
@@ -514,6 +551,17 @@ def fetch_boundary_geojson(park: Park, retries: int, timeout: int) -> dict[str, 
 
     final_features = annotate_and_rank_features(park, features)
     return {"type": "FeatureCollection", "features": final_features}
+
+
+def write_bundle(output_path: Path, records_by_ref: dict[str, dict[str, Any]]) -> None:
+    ordered = [records_by_ref[k] for k in sorted(records_by_ref.keys())]
+    bundle = {
+        "version": 1,
+        "generatedAt": now_iso(),
+        "records": ordered,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_existing_records(path: Path) -> dict[str, dict[str, Any]]:
@@ -584,7 +632,12 @@ def main() -> int:
                 continue
 
         try:
-            geojson = fetch_boundary_geojson(park, retries=args.retries, timeout=args.timeout)
+            geojson = fetch_boundary_geojson(
+                park,
+                retries=args.retries,
+                timeout=args.timeout,
+                mode=args.mode,
+            )
             if geojson and geojson.get("features"):
                 feature_count = len(geojson["features"])
                 selected_name = str(
@@ -656,19 +709,19 @@ def main() -> int:
 
         time.sleep(max(args.delay_ms, 0) / 1000.0)
 
-    ordered = [existing[k] for k in sorted(existing.keys())]
-    bundle = {
-        "version": 1,
-        "generatedAt": now_iso(),
-        "records": ordered,
-    }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+        if args.save_every > 0 and idx % args.save_every == 0:
+            write_bundle(output_path, existing)
+            print(
+                f"Checkpoint saved at {idx}/{total} "
+                f"(records={len(existing)}, fetched={fetched}, no-boundary={no_boundary}, failed={failed})"
+            )
+
+    write_bundle(output_path, existing)
 
     print(
         "Done. "
         f"new fetched={fetched}, new no-boundary={no_boundary}, failed={failed}, "
-        f"total records in bundle={len(ordered)}"
+        f"total records in bundle={len(existing)}"
     )
     print(f"Wrote: {output_path}")
     print(f"Wrote issues log: {issues_path}")

@@ -66,6 +66,8 @@ const NO_BOUNDARY_CACHE_VERSION = 2;
 const BOUNDARY_BUNDLE_VERSION = 1;
 let boundaryDbPromise = null;
 const ISSUE_LOG_STORAGE_KEY = "pota-boundary-issue-log-v1";
+const OVERPASS_TIMEOUT_MS_INTERACTIVE = 25000;
+const OVERPASS_TIMEOUT_MS_PREFETCH = 12000;
 let issueLog = [];
 let sessionIgnorePersistedCache = false;
 
@@ -642,6 +644,11 @@ function isRiverPark(park) {
   return /wild and scenic river/i.test(String(park?.name || ""));
 }
 
+function isLikelyNonPolygonPark(park) {
+  const name = String(park?.name || "");
+  return /\b(historic trail|scenic trail|state trail|national trail|parkway)\b/i.test(name);
+}
+
 function escapeOverpassRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -702,7 +709,8 @@ function extractFeaturesByMode(geo, mode) {
   );
 }
 
-async function overpassRequest(query) {
+async function overpassRequest(query, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || OVERPASS_TIMEOUT_MS_INTERACTIVE);
   const endpoints = [
     "https://overpass-api.de/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
@@ -713,11 +721,19 @@ async function overpassRequest(query) {
   let lastError = null;
   for (const endpoint of endpoints) {
     try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
-        body,
-      });
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      let response;
+      try {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+          body,
+          signal: controller.signal,
+        });
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
       if (!response.ok) {
         throw new Error(`${endpoint} returned ${response.status}`);
       }
@@ -736,7 +752,16 @@ async function overpassRequest(query) {
 }
 
 async function fetchBoundaryGeoJson(park) {
+  const mode = arguments.length > 1 && arguments[1] ? arguments[1] : "full";
+  const fastMode = mode === "fast";
+  const requestOptions = { timeoutMs: fastMode ? OVERPASS_TIMEOUT_MS_PREFETCH : OVERPASS_TIMEOUT_MS_INTERACTIVE };
+  if (fastMode && isLikelyNonPolygonPark(park)) {
+    return null;
+  }
   if (isRiverPark(park)) {
+    if (fastMode) {
+      return null;
+    }
     const variants = riverNameVariants(park.name).slice(0, 6);
     const radii = [50000, 140000, 260000];
     const riverFeatures = [];
@@ -744,7 +769,7 @@ async function fetchBoundaryGeoJson(park) {
     for (const radius of radii) {
       for (const variant of variants) {
         try {
-          const payload = await overpassRequest(buildRiverExactNameQuery(park, radius, variant));
+          const payload = await overpassRequest(buildRiverExactNameQuery(park, radius, variant), requestOptions);
           const geo = osmtogeojson(payload);
           const scored = extractFeaturesByMode(geo, "river")
             .map((f) => {
@@ -797,21 +822,21 @@ async function fetchBoundaryGeoJson(park) {
     };
   }
 
-  const radius = park.name.includes("National Forest") ? 350000 : 120000;
-  const first = await overpassRequest(buildOverpassQuery(park, radius));
+  const radius = park.name.includes("National Forest") ? (fastMode ? 220000 : 350000) : (fastMode ? 80000 : 120000);
+  const first = await overpassRequest(buildOverpassQuery(park, radius), requestOptions);
 
   let geo = osmtogeojson(first);
   let features = extractFeaturesByMode(geo, "protected");
 
-  if (!features.length) {
-    const fallback = await overpassRequest(buildOverpassQuery(park, 450000));
+  if (!features.length && !fastMode) {
+    const fallback = await overpassRequest(buildOverpassQuery(park, 450000), requestOptions);
     geo = osmtogeojson(fallback);
     features = extractFeaturesByMode(geo, "protected");
   }
 
   // If exact name matching fails, look for nearby protected boundaries with similar names.
-  if (!features.length) {
-    const broad = await overpassRequest(buildOverpassBroadQuery(park, 180000));
+  if (!features.length && !fastMode) {
+    const broad = await overpassRequest(buildOverpassBroadQuery(park, 180000), requestOptions);
     geo = osmtogeojson(broad);
     const candidates = extractFeaturesByMode(geo, "protected")
       .map((f) => {
@@ -894,6 +919,10 @@ function sleep(ms) {
 }
 
 async function getBoundaryWithCache(park) {
+  const options = arguments.length > 1 && arguments[1] ? arguments[1] : {};
+  const mode = options.mode || "full";
+  const cacheMissResult = options.cacheMissResult !== false;
+
   if (boundaryCache.has(park.reference)) {
     return { geojson: boundaryCache.get(park.reference), source: "cache" };
   }
@@ -915,11 +944,11 @@ async function getBoundaryWithCache(park) {
     }
   }
 
-  const geojson = await fetchBoundaryGeoJson(park);
+  const geojson = await fetchBoundaryGeoJson(park, mode);
   if (geojson && geojson.features?.length) {
     boundaryCache.set(park.reference, geojson);
     await dbWriteBoundary(park.reference, geojson);
-  } else {
+  } else if (cacheMissResult) {
     noBoundaryCache.add(park.reference);
     await dbWriteBoundary(park.reference, null);
   }
@@ -1023,7 +1052,10 @@ async function prefetchStateBoundaries() {
       const park = parksInState[i];
       let requestSource = null;
       try {
-        const { geojson, source } = await getBoundaryWithCache(park);
+        const { geojson, source } = await getBoundaryWithCache(park, {
+          mode: "fast",
+          cacheMissResult: false,
+        });
         requestSource = source;
         if (source === "cache" || source === "cache-none") {
           cachedCount += 1;
@@ -1060,7 +1092,7 @@ async function prefetchStateBoundaries() {
 
       // Respect Overpass capacity when we are making new requests in bulk.
       if (requestSource === "network") {
-        await sleep(250);
+        await sleep(75);
       }
     }
   } finally {

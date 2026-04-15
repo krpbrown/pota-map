@@ -51,13 +51,20 @@ Build for specific states:
 python ./scripts/build_boundary_bundle.py --states UT CO AZ
 ```
 
+Fast bulk mode is now default (`--mode fast`) and writes checkpoints every 10 parks.
+Use full mode only when you need deeper matching:
+
+```bash
+python ./scripts/build_boundary_bundle.py --states UT --mode full --save-every 5
+```
+
 Reprocess specific references (if matching logic changed):
 
 ```bash
 python ./scripts/build_boundary_bundle.py --states UT --force-refs US-0557 US-0895
 ```
 
-Build for all parks:
+Build for all parks (fast mode):
 
 ```bash
 python ./scripts/build_boundary_bundle.py --all

@@ -16,6 +16,11 @@ const importBoundaryFileInput = document.getElementById("importBoundaryFileInput
 const clearSessionCacheBtn = document.getElementById("clearSessionCacheBtn");
 const issueLogSummaryEl = document.getElementById("issueLogSummary");
 const issueLogOutputEl = document.getElementById("issueLogOutput");
+const toggleDiagBtn = document.getElementById("toggleDiagBtn");
+const copyDiagBtn = document.getElementById("copyDiagBtn");
+const clearDiagBtn = document.getElementById("clearDiagBtn");
+const diagSummaryEl = document.getElementById("diagSummary");
+const diagOutputEl = document.getElementById("diagOutput");
 
 // If the user pressed browser reload, force a cache-busted navigation once.
 (() => {
@@ -70,6 +75,8 @@ const OVERPASS_TIMEOUT_MS_INTERACTIVE = 25000;
 const OVERPASS_TIMEOUT_MS_PREFETCH = 12000;
 let issueLog = [];
 let sessionIgnorePersistedCache = false;
+let boundaryDiagEntries = [];
+let boundaryDiagStartMs = 0;
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -77,6 +84,64 @@ function setStatus(message) {
 
 function setPrefetchStatus(message) {
   prefetchStatusEl.textContent = message;
+}
+
+function shortenErrorMessage(err) {
+  const msg = String(err?.message || err || "Unknown error");
+  return msg.replace(/\s+/g, " ").slice(0, 600);
+}
+
+function appendBoundaryDiag(level, message) {
+  const now = Date.now();
+  const elapsed = boundaryDiagStartMs ? now - boundaryDiagStartMs : 0;
+  const prefix = `[+${(elapsed / 1000).toFixed(2)}s] [${level}]`;
+  boundaryDiagEntries.push(`${prefix} ${message}`);
+  if (boundaryDiagEntries.length > 300) {
+    boundaryDiagEntries = boundaryDiagEntries.slice(boundaryDiagEntries.length - 300);
+  }
+  renderBoundaryDiagnostics();
+}
+
+function renderBoundaryDiagnostics() {
+  if (!boundaryDiagEntries.length) {
+    diagSummaryEl.textContent = "No boundary diagnostics yet.";
+    diagOutputEl.textContent = "";
+    return;
+  }
+  const last = boundaryDiagEntries[boundaryDiagEntries.length - 1];
+  diagSummaryEl.textContent = `Boundary diagnostics: ${boundaryDiagEntries.length} entries. Last: ${last}`;
+  diagOutputEl.textContent = boundaryDiagEntries.join("\n");
+}
+
+function startBoundaryDiagnostics(park) {
+  boundaryDiagEntries = [];
+  boundaryDiagStartMs = Date.now();
+  appendBoundaryDiag("info", `Boundary request started for ${park.reference} ${park.name}`);
+}
+
+function clearBoundaryDiagnostics() {
+  boundaryDiagEntries = [];
+  boundaryDiagStartMs = 0;
+  renderBoundaryDiagnostics();
+}
+
+function toggleBoundaryDiagnostics() {
+  diagOutputEl.hidden = !diagOutputEl.hidden;
+  toggleDiagBtn.textContent = diagOutputEl.hidden ? "View Boundary Diagnostics" : "Hide Boundary Diagnostics";
+}
+
+async function copyBoundaryDiagnostics() {
+  const text = diagOutputEl.textContent || "";
+  if (!text) {
+    diagSummaryEl.textContent = "No diagnostics to copy yet.";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    diagSummaryEl.textContent = `Boundary diagnostics copied (${boundaryDiagEntries.length} entries).`;
+  } catch (err) {
+    diagSummaryEl.textContent = `Copy failed: ${shortenErrorMessage(err)}`;
+  }
 }
 
 function loadIssueLog() {
@@ -711,6 +776,8 @@ function extractFeaturesByMode(geo, mode) {
 
 async function overpassRequest(query, options = {}) {
   const timeoutMs = Number(options.timeoutMs || OVERPASS_TIMEOUT_MS_INTERACTIVE);
+  const diag = typeof options.diag === "function" ? options.diag : null;
+  const diagTag = options.diagTag ? ` (${options.diagTag})` : "";
   const endpoints = [
     "https://overpass-api.de/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
@@ -721,6 +788,10 @@ async function overpassRequest(query, options = {}) {
   let lastError = null;
   for (const endpoint of endpoints) {
     try {
+      const endpointStart = Date.now();
+      if (diag) {
+        diag("info", `Trying ${endpoint}${diagTag} timeout=${timeoutMs}ms queryLen=${query.length}`);
+      }
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
       let response;
@@ -742,9 +813,15 @@ async function overpassRequest(query, options = {}) {
       if (remark && /runtime error|timed out|too busy|Dispatcher_Client/i.test(remark)) {
         throw new Error(`Overpass remark from ${endpoint}: ${remark}`);
       }
+      if (diag) {
+        diag("info", `${endpoint}${diagTag} succeeded in ${Date.now() - endpointStart}ms`);
+      }
       return payload;
     } catch (err) {
       lastError = err;
+      if (diag) {
+        diag("warn", `${endpoint}${diagTag} failed: ${shortenErrorMessage(err)}`);
+      }
     }
   }
 
@@ -754,12 +831,25 @@ async function overpassRequest(query, options = {}) {
 async function fetchBoundaryGeoJson(park) {
   const mode = arguments.length > 1 && arguments[1] ? arguments[1] : "full";
   const fastMode = mode === "fast";
-  const requestOptions = { timeoutMs: fastMode ? OVERPASS_TIMEOUT_MS_PREFETCH : OVERPASS_TIMEOUT_MS_INTERACTIVE };
+  const diag = arguments.length > 2 && typeof arguments[2] === "function" ? arguments[2] : null;
+  const requestOptions = {
+    timeoutMs: fastMode ? OVERPASS_TIMEOUT_MS_PREFETCH : OVERPASS_TIMEOUT_MS_INTERACTIVE,
+    diag,
+  };
+  if (diag) {
+    diag("info", `fetchBoundaryGeoJson mode=${mode} name="${park.name}"`);
+  }
   if (fastMode && isLikelyNonPolygonPark(park)) {
+    if (diag) {
+      diag("info", "Fast mode skip: likely non-polygon trail/parkway.");
+    }
     return null;
   }
   if (isRiverPark(park)) {
     if (fastMode) {
+      if (diag) {
+        diag("info", "Fast mode skip: river-park path disabled in fast mode.");
+      }
       return null;
     }
     const variants = riverNameVariants(park.name).slice(0, 6);
@@ -769,7 +859,10 @@ async function fetchBoundaryGeoJson(park) {
     for (const radius of radii) {
       for (const variant of variants) {
         try {
-          const payload = await overpassRequest(buildRiverExactNameQuery(park, radius, variant), requestOptions);
+          const payload = await overpassRequest(
+            buildRiverExactNameQuery(park, radius, variant),
+            { ...requestOptions, diagTag: `river radius=${radius} variant="${variant}"` },
+          );
           const geo = osmtogeojson(payload);
           const scored = extractFeaturesByMode(geo, "river")
             .map((f) => {
@@ -791,6 +884,9 @@ async function fetchBoundaryGeoJson(park) {
             riverFeatures.push(...scored);
           }
         } catch (err) {
+          if (diag) {
+            diag("warn", `River candidate failed radius=${radius} variant="${variant}": ${shortenErrorMessage(err)}`);
+          }
           // Continue trying additional names/radii/endpoints for resilience.
         }
       }
@@ -800,6 +896,9 @@ async function fetchBoundaryGeoJson(park) {
     }
 
     if (!riverFeatures.length) {
+      if (diag) {
+        diag("warn", "River mode returned no matching features.");
+      }
       return null;
     }
 
@@ -823,20 +922,35 @@ async function fetchBoundaryGeoJson(park) {
   }
 
   const radius = park.name.includes("National Forest") ? (fastMode ? 220000 : 350000) : (fastMode ? 80000 : 120000);
-  const first = await overpassRequest(buildOverpassQuery(park, radius), requestOptions);
+  const first = await overpassRequest(
+    buildOverpassQuery(park, radius),
+    { ...requestOptions, diagTag: `exact radius=${radius}` },
+  );
 
   let geo = osmtogeojson(first);
   let features = extractFeaturesByMode(geo, "protected");
+  if (diag) {
+    diag("info", `Exact query returned ${features.length} polygon candidate(s).`);
+  }
 
   if (!features.length && !fastMode) {
-    const fallback = await overpassRequest(buildOverpassQuery(park, 450000), requestOptions);
+    const fallback = await overpassRequest(
+      buildOverpassQuery(park, 450000),
+      { ...requestOptions, diagTag: "exact fallback radius=450000" },
+    );
     geo = osmtogeojson(fallback);
     features = extractFeaturesByMode(geo, "protected");
+    if (diag) {
+      diag("info", `Fallback exact query returned ${features.length} polygon candidate(s).`);
+    }
   }
 
   // If exact name matching fails, look for nearby protected boundaries with similar names.
   if (!features.length && !fastMode) {
-    const broad = await overpassRequest(buildOverpassBroadQuery(park, 180000), requestOptions);
+    const broad = await overpassRequest(
+      buildOverpassBroadQuery(park, 180000),
+      { ...requestOptions, diagTag: "broad radius=180000" },
+    );
     geo = osmtogeojson(broad);
     const candidates = extractFeaturesByMode(geo, "protected")
       .map((f) => {
@@ -859,10 +973,16 @@ async function fetchBoundaryGeoJson(park) {
           },
         };
       });
+      if (diag) {
+        diag("info", `Broad similarity fallback accepted ${features.length} candidate(s).`);
+      }
     }
   }
 
   if (!features.length) {
+    if (diag) {
+      diag("warn", "No polygon features after all query stages.");
+    }
     return null;
   }
 
@@ -922,35 +1042,62 @@ async function getBoundaryWithCache(park) {
   const options = arguments.length > 1 && arguments[1] ? arguments[1] : {};
   const mode = options.mode || "full";
   const cacheMissResult = options.cacheMissResult !== false;
+  const diag = typeof options.diag === "function" ? options.diag : null;
 
   if (boundaryCache.has(park.reference)) {
+    if (diag) {
+      diag("info", `Memory cache hit for ${park.reference}.`);
+    }
     return { geojson: boundaryCache.get(park.reference), source: "cache" };
   }
   if (noBoundaryCache.has(park.reference)) {
+    if (diag) {
+      diag("info", `Memory no-boundary cache hit for ${park.reference}.`);
+    }
     return { geojson: null, source: "cache-none" };
   }
 
   if (!sessionIgnorePersistedCache) {
+    if (diag) {
+      diag("info", `Checking IndexedDB cache for ${park.reference}...`);
+    }
     const persisted = await dbReadBoundary(park.reference);
     if (persisted) {
       if (persisted.geojson && persisted.geojson.features?.length) {
         boundaryCache.set(park.reference, persisted.geojson);
+        if (diag) {
+          diag("info", `IndexedDB cache hit with ${persisted.geojson.features.length} feature(s).`);
+        }
         return { geojson: persisted.geojson, source: "cache" };
       }
       if (persisted.noBoundaryVersion === NO_BOUNDARY_CACHE_VERSION) {
         noBoundaryCache.add(park.reference);
+        if (diag) {
+          diag("info", "IndexedDB no-boundary cache hit.");
+        }
         return { geojson: null, source: "cache-none" };
       }
     }
+    if (diag) {
+      diag("info", `IndexedDB miss for ${park.reference}; fetching from network.`);
+    }
   }
 
-  const geojson = await fetchBoundaryGeoJson(park, mode);
+  const geojson = await fetchBoundaryGeoJson(park, mode, diag);
   if (geojson && geojson.features?.length) {
     boundaryCache.set(park.reference, geojson);
     await dbWriteBoundary(park.reference, geojson);
+    if (diag) {
+      diag("info", `Network lookup success; cached ${geojson.features.length} feature(s).`);
+    }
   } else if (cacheMissResult) {
     noBoundaryCache.add(park.reference);
     await dbWriteBoundary(park.reference, null);
+    if (diag) {
+      diag("info", "Network lookup returned no boundary; stored no-boundary cache entry.");
+    }
+  } else if (diag) {
+    diag("info", "Network lookup returned no boundary; no-boundary result not persisted (fast mode).");
   }
   return { geojson, source: "network" };
 }
@@ -960,14 +1107,21 @@ async function loadBoundary() {
     return;
   }
 
+  startBoundaryDiagnostics(currentPark);
+  appendBoundaryDiag("info", "UI action: Load Boundary clicked.");
   setStatus("Fetching boundary polygons from OpenStreetMap/Overpass...");
   loadBoundaryBtn.disabled = true;
 
   try {
-    const { geojson, source } = await getBoundaryWithCache(currentPark);
+    const { geojson, source } = await getBoundaryWithCache(currentPark, {
+      mode: "full",
+      cacheMissResult: true,
+      diag: appendBoundaryDiag,
+    });
     clearBoundary();
 
     if (!geojson || !geojson.features?.length) {
+      appendBoundaryDiag("warn", "Completed with no boundary features.");
       setStatus("No boundary polygon found for this park name. Point marker shown only.");
       updateButtons();
       return;
@@ -1005,10 +1159,12 @@ async function loadBoundary() {
 
     map.fitBounds(boundaryLayer.getBounds(), { padding: [20, 20] });
     const sourceLabel = source === "cache" ? "cache" : "network";
+    appendBoundaryDiag("info", `Completed successfully from ${sourceLabel}; featureCount=${geojson.features.length}`);
     setStatus(`Loaded ${geojson.features.length} boundary feature(s) (${sourceLabel}).`);
   } catch (error) {
     console.error(error);
-    setStatus("Boundary lookup failed. Try again in a moment or choose another park.");
+    appendBoundaryDiag("error", `Boundary lookup failed: ${shortenErrorMessage(error)}`);
+    setStatus("Boundary lookup failed. Open \"View Boundary Diagnostics\" and copy the log.");
   } finally {
     loadBoundaryBtn.disabled = false;
     updateButtons();
@@ -1160,6 +1316,9 @@ importBoundaryFileInput.addEventListener("change", () => {
   importBoundaryBundleFromFile(file);
 });
 clearSessionCacheBtn.addEventListener("click", clearSessionCache);
+toggleDiagBtn.addEventListener("click", toggleBoundaryDiagnostics);
+copyDiagBtn.addEventListener("click", copyBoundaryDiagnostics);
+clearDiagBtn.addEventListener("click", clearBoundaryDiagnostics);
 stateCodeInputEl.addEventListener("input", () => {
   stateCodeInputEl.value = stateCodeInputEl.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
 });
@@ -1171,4 +1330,5 @@ stateCodeInputEl.addEventListener("keydown", (event) => {
 
 loadIssueLog();
 renderIssueLog();
+renderBoundaryDiagnostics();
 loadParkIndex();

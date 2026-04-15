@@ -67,6 +67,12 @@ body {
   border-top: 1px dashed var(--border);
 }
 
+.diagnostics {
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
+  border-top: 1px dashed var(--border);
+}
+
 .prefetch-bottom {
   margin: 0 1rem 1rem;
   padding: 0.9rem;
@@ -97,6 +103,15 @@ body {
 #toggleIssueLogBtn,
 #exportIssueLogBtn {
   background: #4f5f79;
+}
+
+#toggleDiagBtn,
+#copyDiagBtn {
+  background: #4f5f79;
+}
+
+#clearDiagBtn {
+  background: #7a4c4c;
 }
 
 #exportBoundaryBundleBtn,
